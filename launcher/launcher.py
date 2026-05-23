@@ -109,6 +109,10 @@ def save_config(cfg: dict) -> None:
 
 def ensure_admin_rights() -> bool:
     """Stellt sicher, dass der Launcher mit Adminrechten laeuft."""
+    # Im Debug-/Script-Modus keine automatische Elevation erzwingen.
+    if not getattr(sys, "frozen", False):
+        return True
+
     try:
         is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
@@ -122,7 +126,7 @@ def ensure_admin_rights() -> bool:
         rc = ctypes.windll.shell32.ShellExecuteW(
             None,
             "runas",
-            sys.executable,
+            _current_executable_path(),
             params,
             None,
             1,

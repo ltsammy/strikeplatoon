@@ -60,7 +60,6 @@ class LauncherWindow(QMainWindow):
         self.selected_ts_plugins_dir = ""
         self._aspect_w = 1000
         self._aspect_h = 1337
-        self._muted_ts_pids: set[int] = set()
 
         self.setWindowTitle("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
@@ -939,8 +938,44 @@ class LauncherWindow(QMainWindow):
         self.ts_proc = None
         self.ts_url_pid = None
         self.started_ts_pids.clear()
-        self._muted_ts_pids.clear()
         return True
+
+    def _set_teamspeak_sound_pack_deactivated(self) -> None:
+        appdata = os.environ.get("APPDATA", "")
+        if not appdata:
+            return
+
+        settings_file = os.path.join(appdata, "TS3Client", "settings.ini")
+        if not os.path.isfile(settings_file):
+            return
+
+        try:
+            with open(settings_file, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+        except OSError:
+            return
+
+        changed = False
+        if re.search(r"(?mi)^\s*SoundPack\s*=", content):
+            new_content = re.sub(r"(?mi)^\s*SoundPack\s*=.*$", "SoundPack=Sounds deactivated", content)
+            if new_content != content:
+                content = new_content
+                changed = True
+        else:
+            if content and not content.endswith("\n"):
+                content += "\n"
+            content += "SoundPack=Sounds deactivated\n"
+            changed = True
+
+        if not changed:
+            return
+
+        try:
+            with open(settings_file, "w", encoding="utf-8") as fh:
+                fh.write(content)
+            self._log("[INFO] TeamSpeak Sound Pack auf 'Sounds deactivated' gesetzt.")
+        except OSError as exc:
+            self._log(f"[WARN] TeamSpeak settings.ini konnte nicht aktualisiert werden: {exc}")
 
     def _connect_teamspeak_server(self, ts_exe: str, ts_url: str) -> bool:
         if webbrowser.open(ts_url):
@@ -1009,46 +1044,36 @@ class LauncherWindow(QMainWindow):
 
         self.ts_url_pid = None
         self.started_ts_pids.clear()
-        self._muted_ts_pids.clear()
         before_pids = self._list_teamspeak_pids()
-        args_no_sound = [ts_exe, "-nosingleinstance", "-nosound", ts_url]
-        args_fallback = [ts_exe, "-nosingleinstance", ts_url]
+        self._set_teamspeak_sound_pack_deactivated()
+        args_launch = [ts_exe, "-nosingleinstance", ts_url]
 
         try:
-            self._log("[INFO] Starte TeamSpeak mit deaktivierten Sounds...")
-            self.ts_proc = subprocess.Popen(args_no_sound, cwd=os.path.dirname(ts_exe))
+            self._log("[INFO] Starte TeamSpeak 3...")
+            self.ts_proc = subprocess.Popen(args_launch, cwd=os.path.dirname(ts_exe))
             time.sleep(1.2)
             if self.ts_proc.poll() is not None:
-                self._log("[WARN] TeamSpeak hat '-nosound' nicht akzeptiert. Starte ohne Sound-Flag neu.")
-                self.ts_proc = subprocess.Popen(args_fallback, cwd=os.path.dirname(ts_exe))
+                self._log("[WARN] TeamSpeak wurde beendet. Starte TeamSpeak erneut.")
+                self.ts_proc = subprocess.Popen(args_launch, cwd=os.path.dirname(ts_exe))
         except OSError as exc:
             if getattr(exc, "winerror", None) == 740:
                 self._log("[WARN] TeamSpeak verlangt erhoehte Rechte (WinError 740).")
                 self._log("[HINWEIS] Starte TeamSpeak jetzt explizit erhoeht (runas).")
 
-                params_no_sound = f'-nosingleinstance -nosound "{ts_url}"'
-                params_fallback = f'-nosingleinstance "{ts_url}"'
+                params_launch = f'-nosingleinstance "{ts_url}"'
 
                 before = self._list_teamspeak_pids()
                 rc = ctypes.windll.shell32.ShellExecuteW(
                     None,
                     "runas",
                     ts_exe,
-                    params_no_sound,
+                    params_launch,
                     os.path.dirname(ts_exe),
                     1,
                 )
 
                 if rc <= 32:
-                    self._log("[WARN] Erhoehter Start mit -nosound fehlgeschlagen. Starte ohne Sound-Flag neu.")
-                    rc = ctypes.windll.shell32.ShellExecuteW(
-                        None,
-                        "runas",
-                        ts_exe,
-                        params_fallback,
-                        os.path.dirname(ts_exe),
-                        1,
-                    )
+                    self._log("[WARN] Erhoehter TeamSpeak-Start fehlgeschlagen. Versuche ts3server:// Fallback.")
 
                 if rc > 32:
                     self._log("[OK] TeamSpeak erhoeht gestartet.")
@@ -1061,7 +1086,6 @@ class LauncherWindow(QMainWindow):
                         self._log(f"[INFO] TeamSpeak PID fuer Auto-Beenden gemerkt: {self.ts_url_pid}")
                     else:
                         self._log("[WARN] Keine neue TeamSpeak-PID erkannt. Laufende TS-Instanz wird nicht automatisch beendet.")
-                    self._mute_teamspeak_audio_sessions(self.started_ts_pids)
                     self.ts_proc = None
                     return True
 
@@ -1078,7 +1102,6 @@ class LauncherWindow(QMainWindow):
                         self._log(f"[INFO] TeamSpeak PID fuer Auto-Beenden gemerkt: {self.ts_url_pid}")
                     else:
                         self._log("[WARN] Keine neue TeamSpeak-PID erkannt. Laufende TS-Instanz wird nicht automatisch beendet.")
-                    self._mute_teamspeak_audio_sessions(self.started_ts_pids)
                     self.ts_proc = None
                     return True
                 self._log("[FEHLER] TeamSpeak konnte auch per Protokoll-URL nicht gestartet werden.")
@@ -1096,55 +1119,7 @@ class LauncherWindow(QMainWindow):
         except Exception:
             self.started_ts_pids = set()
 
-        self._mute_teamspeak_audio_sessions(self.started_ts_pids)
         return True
-
-    def _mute_teamspeak_audio_sessions(self, ts_pids: set[int]) -> None:
-        target_names = {"ts3client_win64.exe", "ts3client_win32.exe"}
-
-        try:
-            from pycaw.pycaw import AudioUtilities  # type: ignore[import-not-found]
-        except Exception:
-            self._log("[INFO] pycaw nicht verfuegbar: TeamSpeak-Sessions konnten nicht automatisch stummgeschaltet werden.")
-            return
-
-        for attempt in range(1, 7):
-            muted_any = False
-            try:
-                sessions = AudioUtilities.GetAllSessions()
-                for session in sessions:
-                    process = getattr(session, "Process", None)
-                    if process is None:
-                        continue
-
-                    process_pid = int(getattr(process, "pid", 0) or 0)
-                    process_name = str(getattr(process, "name", lambda: "")() or "").lower()
-
-                    is_target_pid = bool(ts_pids) and process_pid in ts_pids
-                    is_target_name = process_name in target_names
-                    if not (is_target_pid or is_target_name):
-                        continue
-
-                    volume = getattr(session, "SimpleAudioVolume", None)
-                    if volume is None:
-                        continue
-
-                    volume.SetMute(1, None)
-                    if process_pid:
-                        self._muted_ts_pids.add(process_pid)
-                    muted_any = True
-
-                if muted_any:
-                    self._log("[OK] TeamSpeak-Audio (Event-Sounds) wurde fuer gestartete Instanz stummgeschaltet.")
-                    return
-            except Exception as exc:
-                self._log(f"[WARN] TeamSpeak-Audio konnte nicht stummgeschaltet werden: {exc}")
-                return
-
-            if attempt < 6:
-                time.sleep(0.6)
-
-        self._log("[WARN] TeamSpeak-Audio-Session zum Stummschalten nicht gefunden.")
 
     def _kill_pid_tree(self, pid: int) -> bool:
         try:
@@ -1399,18 +1374,25 @@ class LauncherWindow(QMainWindow):
                 "    Start-Sleep -Seconds 8\n"
                 "    exit 1\n"
                 "}\n"
+                "Show-Step 94 'Warte kurz auf Dateifreigabe/Scanner... '\n"
+                "Start-Sleep -Seconds 3\n"
                 "Show-Step 95 'Starte den aktualisierten Launcher neu...'\n"
                 "$started = $false\n"
                 "for ($attempt = 1; $attempt -le 5; $attempt++) {\n"
                 "    try {\n"
-                "        Start-Process -FilePath $target -WorkingDirectory (Split-Path -Path $target -Parent)\n"
-                "        $started = $true\n"
-                "        break\n"
+                "        $proc = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Path $target -Parent) -PassThru\n"
+                "        Start-Sleep -Seconds 3\n"
+                "        if ($proc -and (-not $proc.HasExited)) {\n"
+                "            $started = $true\n"
+                "            break\n"
+                "        }\n"
+                "        Write-Host '      Launcher ist direkt nach dem Start wieder beendet worden; neuer Versuch...'\n"
+                "        Write-Log (\"Launcher nach Start direkt beendet, Versuch {0}\" -f $attempt)\n"
                 "    } catch {\n"
                 "        Write-Host ('      Start fehlgeschlagen: {0}' -f $_.Exception.Message)\n"
                 "        Write-Log (\"Launcher-Start fehlgeschlagen, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
-                "        Start-Sleep -Seconds 2\n"
                 "    }\n"
+                "    Start-Sleep -Seconds 3\n"
                 "}\n"
                 "if (-not $started) {\n"
                 "    Show-Step 100 'Launcher konnte nicht neu gestartet werden.'\n"

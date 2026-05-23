@@ -919,10 +919,18 @@ class LauncherApp(ctk.CTk):
             self._log(f"[INFO] Lade Update herunter: {download_url}")
             with requests.get(download_url, timeout=60, stream=True) as response:
                 response.raise_for_status()
+                expected_size = int(response.headers.get("content-length") or 0)
+                downloaded_size = 0
                 with open(update_exe, "wb") as fh:
                     for chunk in response.iter_content(chunk_size=1024 * 128):
                         if chunk:
                             fh.write(chunk)
+                            downloaded_size += len(chunk)
+
+            if expected_size and downloaded_size != expected_size:
+                raise RuntimeError(
+                    f"Update-Datei unvollstaendig: {downloaded_size} von {expected_size} Bytes geladen"
+                )
 
             current_pid = os.getpid()
             def _ps_escape(value: str) -> str:
@@ -933,6 +941,7 @@ class LauncherApp(ctk.CTk):
                 f"$target = '{_ps_escape(current_exe)}'\n"
                 f"$source = '{_ps_escape(update_exe)}'\n"
                 f"$log = '{_ps_escape(updater_log)}'\n"
+                "$backup = $target + '.bak'\n"
                 "$Host.UI.RawUI.WindowTitle = '104 Launcher Update'\n"
                 "function Write-Log($message) {\n"
                 "    Add-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $message)\n"
@@ -954,13 +963,18 @@ class LauncherApp(ctk.CTk):
                 "for ($attempt = 1; $attempt -le 10; $attempt++) {\n"
                 "    try {\n"
                 "        Show-Step 60 ('Kopiere Update-Datei... Versuch ' + $attempt + ' von 10')\n"
-                "        Copy-Item -Path $source -Destination $target -Force\n"
+                "        if (Test-Path $backup) { Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue }\n"
+                "        if (Test-Path $target) { Move-Item -Path $target -Destination $backup -Force }\n"
+                "        Move-Item -Path $source -Destination $target -Force\n"
                 "        $copied = $true\n"
                 "        Show-Step 85 'Dateien erfolgreich ersetzt.'\n"
                 "        break\n"
                 "    } catch {\n"
                 "        Write-Host ('      Fehler: {0}' -f $_.Exception.Message)\n"
                 "        Write-Log (\"Copy fehlgeschlagen, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
+                "        if ((-not (Test-Path $target)) -and (Test-Path $backup)) {\n"
+                "            Move-Item -Path $backup -Destination $target -Force -ErrorAction SilentlyContinue\n"
+                "        }\n"
                 "        Start-Sleep -Seconds 1\n"
                 "    }\n"
                 "}\n"
@@ -977,7 +991,8 @@ class LauncherApp(ctk.CTk):
                 "Show-Step 100 'Fertig. Der Launcher wird jetzt neu gestartet.'\n"
                 "Write-Host ''\n"
                 "Write-Host 'Update abgeschlossen.'\n"
-                "Remove-Item -Path $source -Force -ErrorAction SilentlyContinue\n"
+                "if (Test-Path $backup) { Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue }\n"
+                "if (Test-Path $source) { Remove-Item -Path $source -Force -ErrorAction SilentlyContinue }\n"
                 "Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
                 "Start-Sleep -Seconds 3\n"
             )

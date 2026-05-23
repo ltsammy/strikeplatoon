@@ -42,7 +42,7 @@ TFAR_PLUGIN_DOWNLOAD_URL = "https://github.com/ltsammy/strikeplatoon/raw/refs/he
 GITHUB_REPO = "ltsammy/strikeplatoon"
 GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
-LAUNCHER_ASSET_NAMES = ("104Launcher.exe", "launcher.exe")
+LAUNCHER_ASSET_NAMES = ("launcher.exe", "104Launcher.exe")
 GITHUB_API_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "104Launcher",

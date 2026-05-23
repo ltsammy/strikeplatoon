@@ -1,7 +1,9 @@
 name: Release Launcher
 
 on:
-  workflow_dispatch:
+  push:
+    branches:
+      - main
 
 permissions:
   contents: write
@@ -49,7 +51,7 @@ jobs:
             const nextTag = bumpVersion(currentTag);
             core.setOutput('current', currentTag);
             core.setOutput('tag', nextTag);
-            core.setOutput('name', `Launcher ${nextTag}`);
+            core.setOutput('name', `104 Launcher v${nextTag}`);
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -69,12 +71,7 @@ jobs:
 
       - name: Build launcher EXE
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name 104Launcher --distpath dist --workpath build/pyinstaller --specpath . --add-data "launcher/logo.png;." --add-data "launcher/logo.ico;." --icon launcher/logo.ico launcher/launcher.py
-
-      - name: Create compatibility launcher.exe
-        shell: pwsh
-        run: |
-          Copy-Item dist/104Launcher.exe dist/launcher.exe
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name launcher --distpath dist --workpath build/pyinstaller --specpath . --add-data "launcher/logo.png;." --add-data "launcher/logo.ico;." --icon launcher/logo.ico launcher/launcher.py
 
       - name: Create GitHub release and upload binaries
         uses: softprops/action-gh-release@v2
@@ -83,6 +80,5 @@ jobs:
           name: ${{ steps.next_version.outputs.name }}
           generate_release_notes: true
           files: |
-            dist/104Launcher.exe
             dist/launcher.exe
           overwrite_files: true

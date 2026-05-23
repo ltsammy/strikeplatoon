@@ -13,7 +13,7 @@ python -m PyInstaller ^
   --clean ^
   --onefile ^
   --windowed ^
-  --name "104Launcher" ^
+  --name "launcher" ^
   --distpath "dist" ^
   --workpath "build\pyinstaller" ^
   --specpath "." ^
@@ -23,8 +23,8 @@ python -m PyInstaller ^
   "launcher\launcher.py"
 
 echo.
-if exist "dist\104Launcher.exe" (
-    echo [OK] EXE erstellt: dist\104Launcher.exe
+if exist "dist\launcher.exe" (
+    echo [OK] EXE erstellt: dist\launcher.exe
 ) else (
     echo [FEHLER] Build fehlgeschlagen.
 )

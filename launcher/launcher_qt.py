@@ -958,25 +958,66 @@ class LauncherWindow(QMainWindow):
             con = sqlite3.connect(settings_db, timeout=5)
             cur = con.cursor()
 
-            cur.execute(
-                "UPDATE Notifications SET value=?, timestamp=? WHERE key=?",
-                ("nosounds", now, "SoundPack"),
-            )
-            if cur.rowcount == 0:
-                cur.execute(
-                    "INSERT INTO Notifications (timestamp, key, value) VALUES (?, ?, ?)",
-                    (now, "SoundPack", "nosounds"),
-                )
+            def _table_columns(table_name: str) -> list[str]:
+                return [str(row[1]) for row in cur.execute(f"PRAGMA table_info({table_name})").fetchall()]
 
-            cur.execute(
-                "UPDATE Connecting SET value=?, timestamp=? WHERE key=?",
-                ("nosounds", now, "LastUsedServerSoundPack"),
-            )
-            if cur.rowcount == 0:
-                cur.execute(
-                    "INSERT INTO Connecting (timestamp, key, value) VALUES (?, ?, ?)",
-                    (now, "LastUsedServerSoundPack", "nosounds"),
-                )
+            def _upsert_key_value(table_name: str, key_name: str, key_value: str, value_text: str) -> bool:
+                table_columns = _table_columns(table_name)
+                lower_map = {column.lower(): column for column in table_columns}
+                key_col = lower_map.get(key_name.lower())
+                value_col = lower_map.get("value")
+                if not key_col or not value_col:
+                    return False
+
+                timestamp_col = lower_map.get("timestamp")
+                if timestamp_col:
+                    cur.execute(
+                        f"UPDATE {table_name} SET {value_col}=?, {timestamp_col}=? WHERE {key_col}=?",
+                        (value_text, now, key_value),
+                    )
+                    if cur.rowcount == 0:
+                        cur.execute(
+                            f"INSERT INTO {table_name} ({timestamp_col}, {key_col}, {value_col}) VALUES (?, ?, ?)",
+                            (now, key_value, value_text),
+                        )
+                else:
+                    cur.execute(
+                        f"UPDATE {table_name} SET {value_col}=? WHERE {key_col}=?",
+                        (value_text, key_value),
+                    )
+                    if cur.rowcount == 0:
+                        cur.execute(
+                            f"INSERT INTO {table_name} ({key_col}, {value_col}) VALUES (?, ?)",
+                            (key_value, value_text),
+                        )
+                return True
+
+            existing_tables = {
+                str(row[0])
+                for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            }
+
+            updates_applied = 0
+            targets = [
+                ("Notifications", "key", "SoundPack", "nosounds"),
+                ("Connecting", "key", "LastUsedServerSoundPack", "nosounds"),
+                ("Application", "key", "SoundPack", "nosounds"),
+                ("General", "key", "SoundPack", "nosounds"),
+            ]
+
+            for table_name, key_col_name, key_value, value_text in targets:
+                if table_name not in existing_tables:
+                    continue
+                try:
+                    if _upsert_key_value(table_name, key_col_name, key_value, value_text):
+                        updates_applied += 1
+                except sqlite3.DatabaseError:
+                    continue
+
+            if updates_applied == 0:
+                con.close()
+                self._log("[WARN] TeamSpeak settings.db Schema unbekannt. Sound Pack konnte nicht gesetzt werden.")
+                return
 
             con.commit()
             con.close()

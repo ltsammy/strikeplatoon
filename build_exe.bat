@@ -26,7 +26,7 @@ python -m PyInstaller ^
 
 echo.
 if exist "dist\launcher.exe" (
-    echo [OK] EXE erstellt: dist\launcher.exe
+  echo [OK] EXE erstellt: dist\launcher.exe
 ) else (
     echo [FEHLER] Build fehlgeschlagen.
 )

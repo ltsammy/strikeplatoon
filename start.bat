@@ -22,6 +22,6 @@ python -m pip install -r "launcher\requirements.txt"
 
 echo.
 echo [2/2] Starte Launcher...
-python "launcher\launcher.py"
+python "launcher\launcher_qt.py"
 
 pause

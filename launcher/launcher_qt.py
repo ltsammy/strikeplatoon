@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import csv
 import ctypes
+from ctypes import wintypes
 import glob
 import os
 import re
@@ -38,7 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-import launcher as backend
+import backend
 
 
 class LauncherWindow(QMainWindow):
@@ -55,10 +56,13 @@ class LauncherWindow(QMainWindow):
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
+        self._aspect_w = 1000
+        self._aspect_h = 1337
 
         self.setWindowTitle("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
         self._configure_window_size_from_background()
+        self._center_window_on_screen()
 
         self.log_signal.connect(self._append_log)
         self.status_signal.connect(self._set_status_on_ui)
@@ -75,20 +79,10 @@ class LauncherWindow(QMainWindow):
             self.setWindowIcon(QIcon(backend.LOGO_ICO_PATH))
 
     def _configure_window_size_from_background(self) -> None:
-        if not os.path.isfile(backend.BACKGROUND_IMAGE_PATH):
-            self.resize(980, 760)
-            self.setMinimumSize(820, 600)
-            return
-
-        bg = QPixmap(backend.BACKGROUND_IMAGE_PATH)
-        if bg.isNull() or bg.width() <= 0 or bg.height() <= 0:
-            self.resize(980, 760)
-            self.setMinimumSize(820, 600)
-            return
-
-        img_w = bg.width()
-        img_h = bg.height()
-
+        # Keep launcher sizing aligned to the intended background aspect (1000:1337).
+        base_w = self._aspect_w
+        base_h = self._aspect_h
+        ratio = base_w / base_h
         screen_w = 1280
         screen_h = 720
         app = QApplication.instance()
@@ -97,14 +91,29 @@ class LauncherWindow(QMainWindow):
             screen_w = max(geometry.width(), 1280)
             screen_h = max(geometry.height(), 720)
 
-        scale = min((screen_w * 0.64) / img_w, (screen_h * 0.72) / img_h)
-        scale = max(0.45, min(scale, 1.0))
+        # Target around 80% of available screen height, while keeping horizontal margins.
+        target_h = int(screen_h * 0.80)
+        max_h_by_width = int((screen_w * 0.90) / ratio)
+        target_h = min(target_h, max_h_by_width)
+        target_h = max(target_h, int(base_h * 0.55))
+        target_w = int(round(target_h * ratio))
 
-        target_w = max(900, int(img_w * scale))
-        target_h = max(620, int(img_h * scale))
+        min_scale = 0.58
+        min_w = max(680, int(base_w * min_scale))
+        min_h = max(860, int(base_h * min_scale))
 
         self.resize(target_w, target_h)
-        self.setMinimumSize(max(820, int(target_w * 0.78)), max(560, int(target_h * 0.78)))
+        self.setMinimumSize(min_w, min_h)
+
+    def _center_window_on_screen(self) -> None:
+        app = QApplication.instance()
+        if app is None or app.primaryScreen() is None:
+            return
+
+        geometry = app.primaryScreen().availableGeometry()
+        x = geometry.x() + (geometry.width() - self.width()) // 2
+        y = geometry.y() + (geometry.height() - self.height()) // 2
+        self.move(x, y)
 
     def _build_ui(self) -> None:
         root = QWidget(self)
@@ -158,40 +167,43 @@ class LauncherWindow(QMainWindow):
 
         paths_layout.addWidget(QLabel("Arma 3 EXE"), 0, 0)
         self.ent_arma = QLineEdit()
+        self.ent_arma.editingFinished.connect(lambda: self._save_paths(log_message=False))
         paths_layout.addWidget(self.ent_arma, 0, 1)
         btn_arma = QPushButton("...")
+        btn_arma.setObjectName("pathBrowseButton")
         btn_arma.setFixedWidth(40)
-        btn_arma.setFixedHeight(34)
+        btn_arma.setFixedHeight(28)
         btn_arma.clicked.connect(self._browse_arma)
         paths_layout.addWidget(btn_arma, 0, 2)
 
         paths_layout.addWidget(QLabel("TS3 EXE"), 1, 0)
         self.ent_ts = QLineEdit()
+        self.ent_ts.editingFinished.connect(lambda: self._save_paths(log_message=False))
         paths_layout.addWidget(self.ent_ts, 1, 1)
         btn_ts = QPushButton("...")
+        btn_ts.setObjectName("pathBrowseButton")
         btn_ts.setFixedWidth(40)
-        btn_ts.setFixedHeight(34)
+        btn_ts.setFixedHeight(28)
         btn_ts.clicked.connect(self._browse_ts)
         paths_layout.addWidget(btn_ts, 1, 2)
 
         paths_layout.addWidget(QLabel("TS3 Pluginpfad"), 2, 0)
         self.ent_ts_plugins = QLineEdit()
+        self.ent_ts_plugins.editingFinished.connect(lambda: self._save_paths(log_message=False))
         paths_layout.addWidget(self.ent_ts_plugins, 2, 1)
         btn_plugins = QPushButton("...")
+        btn_plugins.setObjectName("pathBrowseButton")
         btn_plugins.setFixedWidth(40)
-        btn_plugins.setFixedHeight(34)
+        btn_plugins.setFixedHeight(28)
         btn_plugins.clicked.connect(self._browse_ts_plugins)
         paths_layout.addWidget(btn_plugins, 2, 2)
 
         self.btn_detect = QPushButton("Auto erkennen")
-        self.btn_detect.setFixedHeight(36)
+        self.btn_detect.setObjectName("pathActionButton")
+        self.btn_detect.setFixedWidth(118)
+        self.btn_detect.setFixedHeight(30)
         self.btn_detect.clicked.connect(lambda: self._auto_detect_paths(save=True))
-        paths_layout.addWidget(self.btn_detect, 0, 3)
-
-        self.btn_save = QPushButton("Pfade speichern")
-        self.btn_save.setFixedHeight(36)
-        self.btn_save.clicked.connect(self._save_paths)
-        paths_layout.addWidget(self.btn_save, 1, 3)
+        paths_layout.addWidget(self.btn_detect, 0, 3, 1, 1, Qt.AlignTop)
 
         paths_layout.setColumnStretch(1, 1)
         self.paths_frame.setVisible(False)
@@ -234,6 +246,73 @@ class LauncherWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._update_layout_geometry()
+
+    def nativeEvent(self, eventType, message):  # type: ignore[override]
+        if os.name != "nt":
+            return super().nativeEvent(eventType, message)
+
+        WM_SIZING = 0x0214
+        WMSZ_LEFT = 1
+        WMSZ_RIGHT = 2
+        WMSZ_TOP = 3
+        WMSZ_TOPLEFT = 4
+        WMSZ_TOPRIGHT = 5
+        WMSZ_BOTTOM = 6
+        WMSZ_BOTTOMLEFT = 7
+        WMSZ_BOTTOMRIGHT = 8
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", ctypes.c_long),
+                ("top", ctypes.c_long),
+                ("right", ctypes.c_long),
+                ("bottom", ctypes.c_long),
+            ]
+
+        msg = wintypes.MSG.from_address(int(message))
+        if msg.message != WM_SIZING:
+            return super().nativeEvent(eventType, message)
+
+        rect_ptr = ctypes.cast(msg.lParam, ctypes.POINTER(RECT))
+        rect = rect_ptr.contents
+        edge = int(msg.wParam)
+
+        width = max(1, rect.right - rect.left)
+        height = max(1, rect.bottom - rect.top)
+        ratio = self._aspect_w / self._aspect_h
+
+        min_w = max(1, self.minimumWidth())
+        min_h = max(1, self.minimumHeight())
+
+        width_from_height = max(min_w, int(round(height * ratio)))
+        height_from_width = max(min_h, int(round(width / ratio)))
+
+        use_width_driver = abs(height_from_width - height) <= abs(width_from_height - width)
+        target_w = width if use_width_driver else width_from_height
+        target_h = height_from_width if use_width_driver else height
+
+        target_w = max(min_w, target_w)
+        target_h = max(min_h, target_h)
+
+        is_left = edge in (WMSZ_LEFT, WMSZ_TOPLEFT, WMSZ_BOTTOMLEFT)
+        is_top = edge in (WMSZ_TOP, WMSZ_TOPLEFT, WMSZ_TOPRIGHT)
+
+        if is_left:
+            rect.left = rect.right - target_w
+        else:
+            rect.right = rect.left + target_w
+
+        if is_top:
+            rect.top = rect.bottom - target_h
+        else:
+            rect.bottom = rect.top + target_h
+
+        if edge in (WMSZ_LEFT, WMSZ_RIGHT):
+            rect.bottom = rect.top + target_h
+        elif edge in (WMSZ_TOP, WMSZ_BOTTOM):
+            rect.right = rect.left + target_w
+
+        return True, 0
 
     def _update_layout_geometry(self) -> None:
         width = self.width()
@@ -363,10 +442,26 @@ class LauncherWindow(QMainWindow):
             QPushButton#singleplayerButton:hover {
                 background-color: #35526f;
             }
+            QPushButton#pathBrowseButton {
+                min-height: 24px;
+                font-size: 12px;
+                border-radius: 7px;
+                padding: 1px 6px;
+            }
+            QPushButton#pathActionButton {
+                min-height: 28px;
+                font-size: 12px;
+                border-radius: 8px;
+                padding: 2px 8px;
+            }
             QLabel#statusLabel {
                 color: #b4cadf;
                 font-size: 14px;
                 font-weight: 700;
+                background-color: rgba(6, 16, 30, 150);
+                border: 1px solid rgba(170, 198, 228, 120);
+                border-radius: 10px;
+                padding: 3px 12px;
             }
             """
         )
@@ -438,12 +533,13 @@ class LauncherWindow(QMainWindow):
         if not self.ent_arma.text().strip() or not self.ent_ts.text().strip() or not self.ent_ts_plugins.text().strip():
             self._auto_detect_paths(save=False)
 
-    def _save_paths(self) -> None:
+    def _save_paths(self, log_message: bool = True) -> None:
         self.cfg["arma3_exe"] = self._normalize_path(self.ent_arma.text())
         self.cfg["teamspeak_exe"] = self._normalize_path(self.ent_ts.text())
         self.cfg["teamspeak_plugins_dir"] = self._normalize_path(self.ent_ts_plugins.text(), is_dir=True)
         backend.save_config(self.cfg)
-        self._log("[OK] Pfade gespeichert.")
+        if log_message:
+            self._log("[OK] Pfade gespeichert.")
 
     def _normalize_path(self, value: str, is_dir: bool = False) -> str:
         path = (value or "").strip().strip('"').strip("'")
@@ -461,6 +557,7 @@ class LauncherWindow(QMainWindow):
         file_path, _ = QFileDialog.getOpenFileName(self, "Arma 3 EXE auswählen", "", "Executable (*.exe)")
         if file_path:
             self.ent_arma.setText(file_path)
+            self._save_paths(log_message=False)
 
     def _browse_ts(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "TeamSpeak 3 EXE auswählen", "", "Executable (*.exe)")
@@ -469,11 +566,13 @@ class LauncherWindow(QMainWindow):
             detected_plugins = self._detect_ts_plugins_dir(file_path)
             if detected_plugins:
                 self.ent_ts_plugins.setText(detected_plugins)
+            self._save_paths(log_message=False)
 
     def _browse_ts_plugins(self) -> None:
         folder_path = QFileDialog.getExistingDirectory(self, "TeamSpeak Pluginordner auswählen")
         if folder_path:
             self.ent_ts_plugins.setText(folder_path)
+            self._save_paths(log_message=False)
 
     def _detect_ts_plugins_dir(self, ts_exe_path: str) -> str:
         ts_exe_path = self._normalize_path(ts_exe_path)
@@ -586,7 +685,7 @@ class LauncherWindow(QMainWindow):
             self._log("[WARN] TeamSpeak Pluginpfad konnte nicht automatisch erkannt werden.")
 
         if save:
-            self._save_paths()
+            self._save_paths(log_message=False)
 
     def _open_arma_folder(self) -> None:
         arma_exe = self._normalize_path(self.ent_arma.text())

@@ -10,6 +10,8 @@ import json
 import os
 import re
 import shutil
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -66,6 +68,7 @@ UNINSTALL_REG_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Strike
 APP_BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LOGO_PNG_PATH = os.path.join(APP_BASE_DIR, "logo.png")
 LOGO_ICO_PATH = os.path.join(APP_BASE_DIR, "logo.ico")
+SERVER_QUERY_PORTS = (int(SERVER_PORT), int(SERVER_PORT) + 1)
 
 
 def _get_config_file() -> str:
@@ -386,12 +389,15 @@ class LauncherApp(ctk.CTk):
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
+        self.server_players_value: Optional[str] = None
+        self.mod_count_value: Optional[str] = None
 
         self.title("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
         self.geometry("980x760")
         self.resizable(True, True)
         self._build_ui()
+        self._schedule_info_refresh(initial_delay_ms=250)
         self.after(800, lambda: threading.Thread(target=self._check_launcher_update, daemon=True).start())
 
     def _set_window_icon(self) -> None:
@@ -433,6 +439,21 @@ class LauncherApp(ctk.CTk):
             font=ctk.CTkFont(size=14),
             text_color="#8cb6d6",
         ).grid(row=1, column=1, padx=(0, 16), pady=(0, 16), sticky="w")
+
+        stats_frame = ctk.CTkFrame(self, fg_color="#101827", corner_radius=16)
+        stats_frame.pack(fill="x", padx=18, pady=(0, 10))
+        for column in range(3):
+            stats_frame.columnconfigure(column, weight=1)
+
+        self.version_value_lbl = self._create_stat_card(
+            stats_frame, 0, "Launcher-Version", LAUNCHER_VERSION, "#35518c"
+        )
+        self.server_value_lbl = self._create_stat_card(
+            stats_frame, 1, "Spieler online", "Lade...", "#2b8e49"
+        )
+        self.mod_count_lbl = self._create_stat_card(
+            stats_frame, 2, "Mods in Liste", "Lade...", "#775d2a"
+        )
 
         # Pfad-Karte
         path_frame = ctk.CTkFrame(self, fg_color="#121f33", corner_radius=14)
@@ -547,6 +568,117 @@ class LauncherApp(ctk.CTk):
         self.log_box.configure(state="disabled")
 
         self._load_paths_into_ui()
+
+    def _create_stat_card(
+        self,
+        parent: ctk.CTkFrame,
+        column: int,
+        title: str,
+        value: str,
+        accent_color: str,
+    ) -> ctk.CTkLabel:
+        card = ctk.CTkFrame(parent, fg_color="#121f33", corner_radius=12)
+        card.grid(row=0, column=column, padx=8, pady=8, sticky="nsew")
+
+        ctk.CTkLabel(
+            card,
+            text=title,
+            font=ctk.CTkFont(size=12),
+            text_color="#9ab3ca",
+        ).pack(anchor="w", padx=14, pady=(12, 2))
+
+        value_label = ctk.CTkLabel(
+            card,
+            text=value,
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color="#f7f4e8",
+        )
+        value_label.pack(anchor="w", padx=14, pady=(0, 4))
+
+        ctk.CTkLabel(
+            card,
+            text=" ",
+            fg_color=accent_color,
+            corner_radius=999,
+            width=40,
+            height=4,
+        ).pack(anchor="w", padx=14, pady=(0, 12))
+
+        return value_label
+
+    def _schedule_info_refresh(self, initial_delay_ms: int = 60000) -> None:
+        self.after(initial_delay_ms, self._refresh_info_async)
+
+    def _refresh_info_async(self) -> None:
+        threading.Thread(target=self._refresh_info_worker, daemon=True).start()
+        self._schedule_info_refresh()
+
+    def _refresh_info_worker(self) -> None:
+        players_text = "Nicht erreichbar"
+        mod_count_text = "Nicht erreichbar"
+
+        try:
+            players_text = self._fetch_server_player_text()
+        except Exception as exc:
+            self._log(f"[WARN] Serverstatus konnte nicht geladen werden: {exc}")
+
+        try:
+            response = requests.get(PRESET_URL, timeout=15)
+            response.raise_for_status()
+            mod_count_text = str(len(parse_preset(response.text)))
+        except Exception as exc:
+            self._log(f"[WARN] Modliste konnte nicht geladen werden: {exc}")
+
+        def _apply() -> None:
+            self.server_value_lbl.configure(text=players_text)
+            self.mod_count_lbl.configure(text=mod_count_text)
+
+        self.after(0, _apply)
+
+    def _fetch_server_player_text(self) -> str:
+        for port in SERVER_QUERY_PORTS:
+            stats = self._query_a2s_info(SERVER_IP, port)
+            if stats is not None:
+                players, max_players = stats
+                return f"{players}/{max_players}"
+        return "Offline"
+
+    def _query_a2s_info(self, host: str, port: int) -> Optional[tuple[int, int]]:
+        request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
+
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(2.5)
+            sock.sendto(request, (host, port))
+            response, _ = sock.recvfrom(4096)
+
+        if len(response) < 6 or response[:4] != b"\xFF\xFF\xFF\xFF":
+            return None
+
+        if response[4] == 0x41:
+            challenge = response[5:9]
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2.5)
+                sock.sendto(request + challenge, (host, port))
+                response, _ = sock.recvfrom(4096)
+
+        if len(response) < 6 or response[4] != 0x49:
+            return None
+
+        index = 5
+        index += 1  # protocol
+        for _ in range(4):
+            end = response.find(b"\x00", index)
+            if end == -1:
+                return None
+            index = end + 1
+
+        if index + 6 > len(response):
+            return None
+
+        index += 2  # app id
+        players = response[index]
+        max_players = response[index + 1]
+        return int(players), int(max_players)
 
     def _toggle_log_visibility(self) -> None:
         self.log_visible = not self.log_visible

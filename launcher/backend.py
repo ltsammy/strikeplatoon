@@ -202,11 +202,24 @@ def _create_shortcut(shortcut_path: str, target_path: str, icon_path: str) -> No
         "$Shortcut.Save()\n"
     )
 
+    run_kwargs = {
+        "check": True,
+        "capture_output": True,
+        "text": True,
+    }
+    if os.name == "nt":
+        run_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        startup_cls = getattr(subprocess, "STARTUPINFO", None)
+        startf_flag = getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        if startup_cls is not None and startf_flag:
+            startup = startup_cls()
+            startup.dwFlags |= startf_flag
+            startup.wShowWindow = 0
+            run_kwargs["startupinfo"] = startup
+
     subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
-        check=True,
-        capture_output=True,
-        text=True,
+        **run_kwargs,
     )
 
 

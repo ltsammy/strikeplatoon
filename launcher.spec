@@ -35,6 +35,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['launcher\\logo.ico'],
     uac_admin=True,
+    icon=['launcher\\logo.ico'],
 )

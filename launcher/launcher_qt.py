@@ -80,6 +80,20 @@ class LauncherWindow(QMainWindow):
         if os.path.isfile(backend.LOGO_ICO_PATH):
             self.setWindowIcon(QIcon(backend.LOGO_ICO_PATH))
 
+    def _hidden_subprocess_kwargs(self) -> dict:
+        if os.name != "nt":
+            return {}
+
+        kwargs: dict = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        startup_cls = getattr(subprocess, "STARTUPINFO", None)
+        startf_flag = getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+        if startup_cls is not None and startf_flag:
+            startup = startup_cls()
+            startup.dwFlags |= startf_flag
+            startup.wShowWindow = 0
+            kwargs["startupinfo"] = startup
+        return kwargs
+
     def _configure_window_size_from_background(self) -> None:
         # Keep launcher sizing aligned to the intended background aspect (1000:1337).
         base_w = self._aspect_w
@@ -805,6 +819,7 @@ class LauncherWindow(QMainWindow):
                     text=True,
                     encoding="utf-8",
                     errors="replace",
+                    **self._hidden_subprocess_kwargs(),
                 )
             except Exception:
                 continue
@@ -856,6 +871,32 @@ class LauncherWindow(QMainWindow):
         self.started_ts_pids.clear()
         self._muted_ts_pids.clear()
         return True
+
+    def _connect_teamspeak_server(self, ts_exe: str, ts_url: str) -> bool:
+        if webbrowser.open(ts_url):
+            self._log("[OK] TeamSpeak-Serververbindung ueber ts3server:// geoeffnet.")
+            return True
+
+        self._log("[WARN] TeamSpeak-Verbindung per Browser-Handler fehlgeschlagen. Versuche Fallbacks...")
+
+        if os.name == "nt":
+            try:
+                os.startfile(ts_url)  # type: ignore[attr-defined]
+                self._log("[OK] TeamSpeak-Serververbindung ueber os.startfile(ts3server://) geoeffnet.")
+                return True
+            except Exception:
+                pass
+
+        for extra_args in ([ts_url], ["-nosingleinstance", ts_url]):
+            try:
+                subprocess.Popen([ts_exe, *extra_args], cwd=os.path.dirname(ts_exe))
+                self._log("[OK] TeamSpeak-Serververbindung ueber EXE-Fallback gestartet.")
+                return True
+            except Exception:
+                continue
+
+        self._log("[WARN] TeamSpeak-Serververbindung konnte auch mit Fallback nicht geoeffnet werden.")
+        return False
 
     def _start_teamspeak_managed(self) -> bool:
         ts_url = f"ts3server://{backend.TS3_IP}?port={backend.TS3_PORT}"
@@ -911,9 +952,7 @@ class LauncherWindow(QMainWindow):
                 self._log("[WARN] TeamSpeak hat '-nosound' nicht akzeptiert. Starte ohne Sound-Flag neu.")
                 self.ts_proc = subprocess.Popen(args_fallback, cwd=os.path.dirname(ts_exe))
 
-            connected = webbrowser.open(ts_url)
-            if not connected:
-                self._log("[WARN] TeamSpeak-Verbindung per ts3server:// konnte nicht geoeffnet werden.")
+            self._connect_teamspeak_server(ts_exe, ts_url)
         except OSError as exc:
             if getattr(exc, "winerror", None) == 740:
                 self._log("[WARN] TeamSpeak verlangt erhoehte Rechte (WinError 740).")
@@ -945,9 +984,7 @@ class LauncherWindow(QMainWindow):
 
                 if rc > 32:
                     self._log("[OK] TeamSpeak erhoeht gestartet.")
-                    connected = webbrowser.open(ts_url)
-                    if not connected:
-                        self._log("[WARN] TeamSpeak-Verbindung per ts3server:// konnte nicht geoeffnet werden.")
+                    self._connect_teamspeak_server(ts_exe, ts_url)
                     time.sleep(1.5)
                     after = self._list_teamspeak_pids()
                     new_pids = sorted(after - before)
@@ -963,7 +1000,7 @@ class LauncherWindow(QMainWindow):
 
                 self._log("[WARN] Erhoehter TeamSpeak-Start fehlgeschlagen. Fallback auf ts3server://-Start.")
                 before = self._list_teamspeak_pids()
-                if webbrowser.open(ts_url):
+                if self._connect_teamspeak_server(ts_exe, ts_url):
                     self._log("[OK] TeamSpeak per Protokoll-URL gestartet.")
                     time.sleep(1.5)
                     after = self._list_teamspeak_pids()
@@ -996,8 +1033,7 @@ class LauncherWindow(QMainWindow):
         return True
 
     def _mute_teamspeak_audio_sessions(self, ts_pids: set[int]) -> None:
-        if not ts_pids:
-            return
+        target_names = {"ts3client_win64.exe", "ts3client_win32.exe"}
 
         try:
             from pycaw.pycaw import AudioUtilities  # type: ignore[import-not-found]
@@ -1005,30 +1041,43 @@ class LauncherWindow(QMainWindow):
             self._log("[INFO] pycaw nicht verfuegbar: TeamSpeak-Sessions konnten nicht automatisch stummgeschaltet werden.")
             return
 
-        muted_any = False
-        try:
-            sessions = AudioUtilities.GetAllSessions()
-            for session in sessions:
-                process = getattr(session, "Process", None)
-                if process is None:
-                    continue
-                if int(process.pid) not in ts_pids:
-                    continue
+        for attempt in range(1, 7):
+            muted_any = False
+            try:
+                sessions = AudioUtilities.GetAllSessions()
+                for session in sessions:
+                    process = getattr(session, "Process", None)
+                    if process is None:
+                        continue
 
-                volume = getattr(session, "SimpleAudioVolume", None)
-                if volume is None:
-                    continue
+                    process_pid = int(getattr(process, "pid", 0) or 0)
+                    process_name = str(getattr(process, "name", lambda: "")() or "").lower()
 
-                volume.SetMute(1, None)
-                self._muted_ts_pids.add(int(process.pid))
-                muted_any = True
+                    is_target_pid = bool(ts_pids) and process_pid in ts_pids
+                    is_target_name = process_name in target_names
+                    if not (is_target_pid or is_target_name):
+                        continue
 
-            if muted_any:
-                self._log("[OK] TeamSpeak-Audio (Event-Sounds) wurde fuer gestartete Instanz stummgeschaltet.")
-            else:
-                self._log("[WARN] TeamSpeak-Audio-Session zum Stummschalten nicht gefunden.")
-        except Exception as exc:
-            self._log(f"[WARN] TeamSpeak-Audio konnte nicht stummgeschaltet werden: {exc}")
+                    volume = getattr(session, "SimpleAudioVolume", None)
+                    if volume is None:
+                        continue
+
+                    volume.SetMute(1, None)
+                    if process_pid:
+                        self._muted_ts_pids.add(process_pid)
+                    muted_any = True
+
+                if muted_any:
+                    self._log("[OK] TeamSpeak-Audio (Event-Sounds) wurde fuer gestartete Instanz stummgeschaltet.")
+                    return
+            except Exception as exc:
+                self._log(f"[WARN] TeamSpeak-Audio konnte nicht stummgeschaltet werden: {exc}")
+                return
+
+            if attempt < 6:
+                time.sleep(0.6)
+
+        self._log("[WARN] TeamSpeak-Audio-Session zum Stummschalten nicht gefunden.")
 
     def _kill_pid_tree(self, pid: int) -> bool:
         try:
@@ -1036,6 +1085,7 @@ class LauncherWindow(QMainWindow):
                 ["taskkill", "/PID", str(pid), "/T"],
                 capture_output=True,
                 text=True,
+                **self._hidden_subprocess_kwargs(),
             )
             if result.returncode == 0:
                 return True
@@ -1044,6 +1094,7 @@ class LauncherWindow(QMainWindow):
                 ["taskkill", "/PID", str(pid), "/T", "/F"],
                 capture_output=True,
                 text=True,
+                **self._hidden_subprocess_kwargs(),
             )
             if result_force.returncode == 0:
                 return True
@@ -1067,6 +1118,7 @@ class LauncherWindow(QMainWindow):
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                **self._hidden_subprocess_kwargs(),
             )
             output = (check.stdout or "").strip().lower()
             return ("no tasks are running" in output) or ("keine aufgaben" in output) or not output

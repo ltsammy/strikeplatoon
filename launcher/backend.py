@@ -80,6 +80,7 @@ DEFAULT_CONFIG = {
     "arma3_exe": "",
     "teamspeak_exe": "",
     "teamspeak_plugins_dir": "",
+    "arma_profile": "",
 }
 
 

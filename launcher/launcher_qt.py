@@ -25,6 +25,7 @@ from PySide6.QtCore import QObject, Qt, Signal, QTimer
 from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -214,6 +215,16 @@ class LauncherWindow(QMainWindow):
         btn_plugins.clicked.connect(self._browse_ts_plugins)
         paths_layout.addWidget(btn_plugins, 2, 2)
 
+        paths_layout.addWidget(QLabel("Arma 3 Profil"), 3, 0)
+        self.arma_profile_combo = QComboBox()
+        self.arma_profile_combo.currentIndexChanged.connect(lambda _: self._save_paths(log_message=False))
+        paths_layout.addWidget(self.arma_profile_combo, 3, 1)
+        btn_profile_refresh = QPushButton("Neu laden")
+        btn_profile_refresh.setObjectName("pathActionButton")
+        btn_profile_refresh.setFixedHeight(28)
+        btn_profile_refresh.clicked.connect(lambda: self._refresh_arma_profiles(log_message=True))
+        paths_layout.addWidget(btn_profile_refresh, 3, 2)
+
         self.btn_detect = QPushButton("Auto erkennen")
         self.btn_detect.setObjectName("pathActionButton")
         self.btn_detect.setFixedWidth(118)
@@ -251,7 +262,7 @@ class LauncherWindow(QMainWindow):
         self.discord_btn.clicked.connect(lambda: webbrowser.open(backend.DISCORD_URL))
         bar.addWidget(self.discord_btn)
 
-        self.path_toggle_btn = QPushButton("Pfade anpassen")
+        self.path_toggle_btn = QPushButton("Einstellungen")
         self.path_toggle_btn.setMinimumHeight(42)
         self.path_toggle_btn.clicked.connect(self._toggle_paths_visibility)
         bar.addWidget(self.path_toggle_btn)
@@ -531,13 +542,14 @@ class LauncherWindow(QMainWindow):
     def _toggle_paths_visibility(self) -> None:
         visible = not self.paths_frame.isVisible()
         self.paths_frame.setVisible(visible)
-        self.path_toggle_btn.setText("Pfade ausblenden" if visible else "Pfade anpassen")
+        self.path_toggle_btn.setText("Einstellungen ausblenden" if visible else "Einstellungen")
         self._update_layout_geometry()
 
     def _load_paths_into_ui(self) -> None:
         arma_cfg = self._normalize_path(self.cfg.get("arma3_exe", ""))
         ts_cfg = self._normalize_path(self.cfg.get("teamspeak_exe", ""))
         plugins_cfg = self._normalize_path(self.cfg.get("teamspeak_plugins_dir", ""), is_dir=True)
+        profile_cfg = str(self.cfg.get("arma_profile", "") or "").strip()
 
         if arma_cfg:
             self.ent_arma.setText(arma_cfg)
@@ -546,6 +558,8 @@ class LauncherWindow(QMainWindow):
         if plugins_cfg:
             self.ent_ts_plugins.setText(plugins_cfg)
 
+        self._refresh_arma_profiles(selected_profile=profile_cfg, log_message=False)
+
         if not self.ent_arma.text().strip() or not self.ent_ts.text().strip() or not self.ent_ts_plugins.text().strip():
             self._auto_detect_paths(save=False)
 
@@ -553,9 +567,65 @@ class LauncherWindow(QMainWindow):
         self.cfg["arma3_exe"] = self._normalize_path(self.ent_arma.text())
         self.cfg["teamspeak_exe"] = self._normalize_path(self.ent_ts.text())
         self.cfg["teamspeak_plugins_dir"] = self._normalize_path(self.ent_ts_plugins.text(), is_dir=True)
+        selected_profile = self.arma_profile_combo.currentData() if hasattr(self, "arma_profile_combo") else ""
+        self.cfg["arma_profile"] = str(selected_profile or "")
         backend.save_config(self.cfg)
         if log_message:
             self._log("[OK] Pfade gespeichert.")
+
+    def _find_arma_profile_names(self) -> list[str]:
+        roots: list[str] = []
+        user_profile = os.environ.get("USERPROFILE", "")
+        one_drive = os.environ.get("OneDrive", "")
+
+        if user_profile:
+            roots.append(os.path.join(user_profile, "Documents", "Arma 3 - Other Profiles"))
+        if one_drive:
+            roots.append(os.path.join(one_drive, "Documents", "Arma 3 - Other Profiles"))
+
+        docs_home = os.path.join(os.path.expanduser("~"), "Documents", "Arma 3 - Other Profiles")
+        if docs_home not in roots:
+            roots.append(docs_home)
+
+        names: set[str] = set()
+        for root in roots:
+            if not os.path.isdir(root):
+                continue
+            try:
+                for entry in os.listdir(root):
+                    profile_dir = os.path.join(root, entry)
+                    if os.path.isdir(profile_dir):
+                        names.add(entry)
+            except OSError:
+                continue
+
+        return sorted(names, key=lambda value: value.lower())
+
+    def _refresh_arma_profiles(self, selected_profile: str = "", log_message: bool = False) -> None:
+        selected = (selected_profile or str(self.cfg.get("arma_profile", "") or "")).strip()
+        current_data = self.arma_profile_combo.currentData() if self.arma_profile_combo.count() else ""
+        if not selected and current_data:
+            selected = str(current_data)
+
+        profiles = self._find_arma_profile_names()
+
+        self.arma_profile_combo.blockSignals(True)
+        self.arma_profile_combo.clear()
+        self.arma_profile_combo.addItem("Standard (kein Profil erzwingen)", "")
+        for profile_name in profiles:
+            self.arma_profile_combo.addItem(profile_name, profile_name)
+
+        index = self.arma_profile_combo.findData(selected)
+        if index < 0:
+            index = 0
+        self.arma_profile_combo.setCurrentIndex(index)
+        self.arma_profile_combo.blockSignals(False)
+
+        if log_message:
+            if profiles:
+                self._log(f"[OK] {len(profiles)} Arma-Profil(e) gefunden.")
+            else:
+                self._log("[WARN] Keine Arma-Profile in Dokumente/Arma 3 - Other Profiles gefunden.")
 
     def _normalize_path(self, value: str, is_dir: bool = False) -> str:
         path = (value or "").strip().strip('"').strip("'")
@@ -941,8 +1011,8 @@ class LauncherWindow(QMainWindow):
         self.started_ts_pids.clear()
         self._muted_ts_pids.clear()
         before_pids = self._list_teamspeak_pids()
-        args_no_sound = [ts_exe, "-nosingleinstance", "-nosound"]
-        args_fallback = [ts_exe, "-nosingleinstance"]
+        args_no_sound = [ts_exe, "-nosingleinstance", "-nosound", ts_url]
+        args_fallback = [ts_exe, "-nosingleinstance", ts_url]
 
         try:
             self._log("[INFO] Starte TeamSpeak mit deaktivierten Sounds...")
@@ -951,15 +1021,13 @@ class LauncherWindow(QMainWindow):
             if self.ts_proc.poll() is not None:
                 self._log("[WARN] TeamSpeak hat '-nosound' nicht akzeptiert. Starte ohne Sound-Flag neu.")
                 self.ts_proc = subprocess.Popen(args_fallback, cwd=os.path.dirname(ts_exe))
-
-            self._connect_teamspeak_server(ts_exe, ts_url)
         except OSError as exc:
             if getattr(exc, "winerror", None) == 740:
                 self._log("[WARN] TeamSpeak verlangt erhoehte Rechte (WinError 740).")
                 self._log("[HINWEIS] Starte TeamSpeak jetzt explizit erhoeht (runas).")
 
-                params_no_sound = "-nosingleinstance -nosound"
-                params_fallback = "-nosingleinstance"
+                params_no_sound = f'-nosingleinstance -nosound "{ts_url}"'
+                params_fallback = f'-nosingleinstance "{ts_url}"'
 
                 before = self._list_teamspeak_pids()
                 rc = ctypes.windll.shell32.ShellExecuteW(
@@ -984,7 +1052,6 @@ class LauncherWindow(QMainWindow):
 
                 if rc > 32:
                     self._log("[OK] TeamSpeak erhoeht gestartet.")
-                    self._connect_teamspeak_server(ts_exe, ts_url)
                     time.sleep(1.5)
                     after = self._list_teamspeak_pids()
                     new_pids = sorted(after - before)
@@ -1492,6 +1559,10 @@ class LauncherWindow(QMainWindow):
                 return
 
             args = [arma3_exe, f"-mod={';'.join(mod_paths)}"]
+            selected_profile = str(self.cfg.get("arma_profile", "") or "").strip()
+            if selected_profile:
+                args.append(f"-name={selected_profile}")
+                self._log(f"[INFO] Verwende Arma-Profil: {selected_profile}")
             if join_server:
                 args.extend(
                     [

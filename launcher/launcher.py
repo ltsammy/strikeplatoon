@@ -39,6 +39,7 @@ TS3_IP        = "94.199.215.95"
 TS3_PORT      = "9987"
 TS3_DOWNLOAD_URL = "https://www.teamspeak.com/de/downloads/#ts3client"
 TFAR_PLUGIN_DOWNLOAD_URL = "https://github.com/ltsammy/strikeplatoon/raw/refs/heads/main/task_force_radio.ts3_plugin"
+DISCORD_URL = "https://discord.gg/ageofclones"
 GITHUB_REPO = "ltsammy/strikeplatoon"
 GITHUB_API_LATEST_RELEASE_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
@@ -504,6 +505,16 @@ class LauncherApp(ctk.CTk):
             command=self._toggle_log_visibility,
         )
         self.toggle_log_btn.pack(side="left", padx=(8, 0))
+
+        self.discord_btn = ctk.CTkButton(
+            action_frame,
+            text="Discord",
+            width=120, height=44,
+            font=ctk.CTkFont(size=12),
+            fg_color="#35518c", hover_color="#4464a7",
+            command=lambda: webbrowser.open(DISCORD_URL),
+        )
+        self.discord_btn.pack(side="left", padx=(8, 0))
 
         self.launch_btn = ctk.CTkButton(
             action_frame,

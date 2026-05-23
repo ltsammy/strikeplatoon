@@ -17,6 +17,7 @@ python -m PyInstaller ^
   --distpath "dist" ^
   --workpath "build\pyinstaller" ^
   --specpath "." ^
+  --add-data "background.mp4;." ^
   --add-data "launcher\logo.png;." ^
   --add-data "launcher\logo.ico;." ^
   --icon "launcher\logo.ico" ^

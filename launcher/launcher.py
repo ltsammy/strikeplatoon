@@ -901,7 +901,7 @@ class LauncherApp(ctk.CTk):
 
         current_exe = _current_executable_path()
         update_exe = os.path.join(tempfile.gettempdir(), f"launcher_update_{remote_version}.exe")
-        updater_cmd = os.path.join(tempfile.gettempdir(), "launcher_apply_update.cmd")
+        updater_script = os.path.join(tempfile.gettempdir(), "launcher_apply_update.ps1")
         updater_log = os.path.join(tempfile.gettempdir(), "launcher_apply_update.log")
 
         try:
@@ -914,48 +914,79 @@ class LauncherApp(ctk.CTk):
                             fh.write(chunk)
 
             current_pid = os.getpid()
-            cmd_content = (
-                "@echo off\n"
-                "setlocal\n"
-                f"set PID={current_pid}\n"
-                f"set TARGET={current_exe}\n"
-                f"set SOURCE={update_exe}\n"
-                f"set LOG={updater_log}\n"
-                "echo [%date% %time%] Update-Skript gestartet > \"%LOG%\"\n"
-                ":waitloop\n"
-                "tasklist /FI \"PID eq %PID%\" | findstr /I \"%PID%\" >nul\n"
-                "if not errorlevel 1 (\n"
-                "  timeout /t 1 /nobreak >nul\n"
-                "  goto waitloop\n"
-                ")\n"
-                "echo [%date% %time%] Zielprozess beendet, starte Austausch >> \"%LOG%\"\n"
-                "set RETRIES=0\n"
-                ":copyloop\n"
-                "copy /Y \"%SOURCE%\" \"%TARGET%\" >nul\n"
-                "if errorlevel 1 (\n"
-                "  set /a RETRIES+=1\n"
-                "  echo [%date% %time%] Copy fehlgeschlagen, Versuch %RETRIES% >> \"%LOG%\"\n"
-                "  if %RETRIES% GEQ 10 goto copyfailed\n"
-                "  timeout /t 1 /nobreak >nul\n"
-                "  goto copyloop\n"
-                ")\n"
-                "echo [%date% %time%] Copy erfolgreich >> \"%LOG%\"\n"
-                "start \"\" \"%TARGET%\"\n"
-                "echo [%date% %time%] Launcher neu gestartet >> \"%LOG%\"\n"
-                "del /Q \"%SOURCE%\" >nul 2>&1\n"
-                "goto end\n"
-                ":copyfailed\n"
-                "echo [%date% %time%] Update dauerhaft fehlgeschlagen >> \"%LOG%\"\n"
-                ":end\n"
-                "endlocal\n"
+            def _ps_escape(value: str) -> str:
+                return value.replace("'", "''")
+
+            script_content = (
+                f"$pidToWait = {current_pid}\n"
+                f"$target = '{_ps_escape(current_exe)}'\n"
+                f"$source = '{_ps_escape(update_exe)}'\n"
+                f"$log = '{_ps_escape(updater_log)}'\n"
+                "$Host.UI.RawUI.WindowTitle = '104 Launcher Update'\n"
+                "function Write-Log($message) {\n"
+                "    Add-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $message)\n"
+                "}\n"
+                "function Show-Step($percent, $status) {\n"
+                "    Write-Progress -Activity '104 Launcher Update' -Status $status -PercentComplete $percent\n"
+                "    Write-Host ('[{0,3}%] {1}' -f $percent, $status)\n"
+                "    Write-Log $status\n"
+                "}\n"
+                "Set-Content -Path $log -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' Update-Skript gestartet')\n"
+                "Write-Host '104 Launcher wird aktualisiert...'\n"
+                "Write-Host ''\n"
+                "Show-Step 10 'Warte darauf, dass sich der Launcher beendet...'\n"
+                "while (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {\n"
+                "    Start-Sleep -Seconds 1\n"
+                "}\n"
+                "Show-Step 35 'Launcher beendet. Bereite Dateiaustausch vor...'\n"
+                "$copied = $false\n"
+                "for ($attempt = 1; $attempt -le 10; $attempt++) {\n"
+                "    try {\n"
+                "        Show-Step 60 ('Kopiere Update-Datei... Versuch ' + $attempt + ' von 10')\n"
+                "        Copy-Item -Path $source -Destination $target -Force\n"
+                "        $copied = $true\n"
+                "        Show-Step 85 'Dateien erfolgreich ersetzt.'\n"
+                "        break\n"
+                "    } catch {\n"
+                "        Write-Host ('      Fehler: {0}' -f $_.Exception.Message)\n"
+                "        Write-Log (\"Copy fehlgeschlagen, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
+                "        Start-Sleep -Seconds 1\n"
+                "    }\n"
+                "}\n"
+                "if (-not $copied) {\n"
+                "    Show-Step 100 'Update fehlgeschlagen.'\n"
+                "    Write-Host ''\n"
+                "    Write-Host 'Das Update konnte nicht installiert werden. Details stehen in:'\n"
+                "    Write-Host $log\n"
+                "    Start-Sleep -Seconds 8\n"
+                "    exit 1\n"
+                "}\n"
+                "Show-Step 95 'Starte den aktualisierten Launcher neu...'\n"
+                "Start-Process -FilePath $target\n"
+                "Show-Step 100 'Fertig. Der Launcher wird jetzt neu gestartet.'\n"
+                "Write-Host ''\n"
+                "Write-Host 'Update abgeschlossen.'\n"
+                "Remove-Item -Path $source -Force -ErrorAction SilentlyContinue\n"
+                "Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+                "Start-Sleep -Seconds 3\n"
             )
 
-            with open(updater_cmd, "w", encoding="utf-8") as fh:
-                fh.write(cmd_content)
+            with open(updater_script, "w", encoding="utf-8") as fh:
+                fh.write(script_content)
 
             subprocess.Popen(
-                ["cmd", "/c", updater_cmd],
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    updater_script,
+                ],
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP
+                    | subprocess.CREATE_NEW_CONSOLE
+                ),
             )
             return True
         except Exception as exc:

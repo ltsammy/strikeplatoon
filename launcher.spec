@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['launcher\\launcher.py'],
+    ['launcher\\launcher_qt.py'],
     pathex=[],
     binaries=[],
-    datas=[('launcher/logo.png', '.'), ('launcher/logo.ico', '.')],
+    datas=[('launcher\\logo.png', '.'), ('launcher\\logo.ico', '.'), ('launcher\\background.jpg', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

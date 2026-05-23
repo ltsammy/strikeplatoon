@@ -6,7 +6,8 @@ echo ============================================
 echo  104 Launcher - EXE erstellen (PyInstaller)
 echo ============================================
 
-python -m pip install pyinstaller >nul 2>&1
+python -m pip install --upgrade pip
+python -m pip install -r launcher\requirements.txt pyinstaller
 
 python -m PyInstaller ^
   --noconfirm ^
@@ -19,8 +20,9 @@ python -m PyInstaller ^
   --specpath "." ^
   --add-data "launcher\logo.png;." ^
   --add-data "launcher\logo.ico;." ^
+  --add-data "launcher\background.jpg;." ^
   --icon "launcher\logo.ico" ^
-  "launcher\launcher.py"
+  "launcher\launcher_qt.py"
 
 echo.
 if exist "dist\launcher.exe" (

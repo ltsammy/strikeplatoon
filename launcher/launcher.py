@@ -27,6 +27,11 @@ import requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
+try:
+    import pywinstyles
+except Exception:
+    pywinstyles = None
+
 from version import LAUNCHER_VERSION
 
 # ---------------------------------------------------------------------------
@@ -51,10 +56,14 @@ GITHUB_API_HEADERS = {
     "User-Agent": "104Launcher",
 }
 ARMA3_APP_ID  = "107410"
-APP_INSTALL_DIR = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "104Launcher")
+local_app_data = os.environ.get("LOCALAPPDATA")
+if not local_app_data:
+    local_app_data = os.path.join(os.environ.get("USERPROFILE", os.path.expanduser("~")), "AppData", "Local")
+
+APP_INSTALL_DIR = os.path.join(local_app_data, "104Launcher")
 INSTALLED_EXE_PATH = os.path.join(APP_INSTALL_DIR, "launcher.exe")
 START_MENU_DIR = os.path.join(
-    os.environ.get("ProgramData", r"C:\ProgramData"),
+    os.environ.get("APPDATA", os.path.expanduser("~")),
     "Microsoft",
     "Windows",
     "Start Menu",
@@ -68,6 +77,7 @@ UNINSTALL_REG_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Strike
 APP_BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LOGO_PNG_PATH = os.path.join(APP_BASE_DIR, "logo.png")
 LOGO_ICO_PATH = os.path.join(APP_BASE_DIR, "logo.ico")
+BACKGROUND_IMAGE_PATH = os.path.join(APP_BASE_DIR, "background.jpg")
 SERVER_QUERY_PORTS = (int(SERVER_PORT), int(SERVER_PORT) + 1)
 
 
@@ -108,38 +118,8 @@ def save_config(cfg: dict) -> None:
 
 
 def ensure_admin_rights() -> bool:
-    """Stellt sicher, dass der Launcher mit Adminrechten laeuft."""
-    try:
-        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
-    except Exception:
-        is_admin = False
-
-    if is_admin:
-        return True
-
-    try:
-        params = " ".join(f'"{arg}"' for arg in sys.argv[1:])
-        rc = ctypes.windll.shell32.ShellExecuteW(
-            None,
-            "runas",
-            sys.executable,
-            params,
-            None,
-            1,
-        )
-        # ShellExecuteW > 32 bedeutet Erfolg.
-        if rc <= 32:
-            messagebox.showerror(
-                "Adminrechte erforderlich",
-                "Der Launcher braucht Administratorrechte. Bitte als Administrator starten.",
-            )
-        return False
-    except Exception:
-        messagebox.showerror(
-            "Adminrechte erforderlich",
-            "Der Launcher braucht Administratorrechte. Bitte als Administrator starten.",
-        )
-        return False
+    """Launcher benoetigt keine globalen Adminrechte."""
+    return True
 
 
 def _current_executable_path() -> str:
@@ -187,7 +167,7 @@ def _write_uninstall_script() -> None:
         f"del /Q \"{startmenu_new}\" >nul 2>&1\n"
         f"del /Q \"{startmenu_old}\" >nul 2>&1\n"
         f"rmdir /S /Q \"{START_MENU_DIR}\" >nul 2>&1\n"
-        f"reg delete \"HKLM\\{UNINSTALL_REG_KEY}\" /f >nul 2>&1\n"
+        f"reg delete \"HKCU\\{UNINSTALL_REG_KEY}\" /f >nul 2>&1\n"
         f"start \"\" cmd /c \"timeout /t 2 /nobreak >nul & rmdir /S /Q \"\"{APP_INSTALL_DIR}\"\"\"\n"
         "endlocal\n"
     )
@@ -197,7 +177,7 @@ def _write_uninstall_script() -> None:
 
 
 def _register_uninstall_entry() -> None:
-    with winreg.CreateKey(winreg.HKEY_LOCAL_MACHINE, UNINSTALL_REG_KEY) as key:
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_REG_KEY) as key:
         winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "Strike Platoon Arma 3")
         winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, LAUNCHER_VERSION)
         winreg.SetValueEx(key, "Publisher", 0, winreg.REG_SZ, "Strike Platoon")
@@ -209,7 +189,7 @@ def _register_uninstall_entry() -> None:
 
 
 def _install_launcher_if_needed() -> bool:
-    """Installiert die EXE nach Program Files und erstellt optional Verknüpfungen.
+    """Installiert die EXE benutzerbezogen und erstellt optional Verknuepfungen.
 
     Returns:
         True: normal weiterlaufen
@@ -224,7 +204,7 @@ def _install_launcher_if_needed() -> bool:
 
     install_now = messagebox.askyesno(
         "Launcher installieren",
-        "Launcher soll unter 'Programme' installiert werden. Jetzt installieren?",
+        "Launcher soll fuer diesen Benutzer installiert werden. Jetzt installieren?",
     )
     if not install_now:
         return True
@@ -256,7 +236,7 @@ def _install_launcher_if_needed() -> bool:
 
         messagebox.showinfo(
             "Installation abgeschlossen",
-            "Launcher wurde installiert und wird jetzt aus 'Programme' gestartet.",
+            "Launcher wurde installiert und wird jetzt aus dem Benutzerprofil gestartet.",
         )
         subprocess.Popen([INSTALLED_EXE_PATH], cwd=APP_INSTALL_DIR)
         return False
@@ -386,6 +366,16 @@ class LauncherApp(ctk.CTk):
         self.cfg = load_config()
         self.log_visible = False
         self.logo_image = None
+        self.background_image = None
+        self._background_source_image = None
+        self._bg_resize_job = None
+        self._transparency_targets: list[tuple[object, Optional[float]]] = []
+        self.transparency_enabled = (
+            sys.platform.startswith("win")
+            and pywinstyles is not None
+            and not getattr(sys, "frozen", False)
+        )
+        self.paths_visible = False
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
@@ -394,11 +384,49 @@ class LauncherApp(ctk.CTk):
 
         self.title("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
-        self.geometry("980x760")
+        self._configure_window_size_from_background()
         self.resizable(True, True)
         self._build_ui()
-        self._schedule_info_refresh(initial_delay_ms=250)
+        self.bind("<Configure>", self._on_window_resize)
+        self.after(250, self._reapply_transparency_targets)
+        self.after(900, self._reapply_transparency_targets)
         self.after(800, lambda: threading.Thread(target=self._check_launcher_update, daemon=True).start())
+
+    def _resolve_background_image_path(self) -> Optional[str]:
+        candidates = [
+            BACKGROUND_IMAGE_PATH,
+            os.path.join(os.path.dirname(APP_BASE_DIR), "background.jpg"),
+            os.path.join(os.getcwd(), "background.jpg"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    def _configure_window_size_from_background(self) -> None:
+        bg_path = self._resolve_background_image_path()
+        if not bg_path:
+            self.geometry("980x760")
+            self.minsize(820, 600)
+            return
+
+        try:
+            with Image.open(bg_path) as img:
+                img_w, img_h = img.size
+        except Exception:
+            self.geometry("980x760")
+            self.minsize(820, 600)
+            return
+
+        screen_w = max(self.winfo_screenwidth(), 1280)
+        screen_h = max(self.winfo_screenheight(), 720)
+        scale = min((screen_w * 0.64) / img_w, (screen_h * 0.72) / img_h)
+        scale = max(0.45, min(scale, 1.0))
+
+        target_w = max(900, int(img_w * scale))
+        target_h = max(620, int(img_h * scale))
+        self.geometry(f"{target_w}x{target_h}")
+        self.minsize(max(820, int(target_w * 0.78)), max(560, int(target_h * 0.78)))
 
     def _set_window_icon(self) -> None:
         """Setzt das Fenster-Icon (Titelleiste/Taskbar) auf das Projektlogo."""
@@ -408,203 +436,313 @@ class LauncherApp(ctk.CTk):
         except Exception:
             pass
 
-    def _build_ui(self) -> None:
-        self.configure(fg_color="#0b1018")
+    def _apply_widget_transparency(self, widget, opacity: Optional[float] = None) -> None:
+        if not self.transparency_enabled:
+            return
 
-        # Hero-Bereich
-        hero = ctk.CTkFrame(self, fg_color="#101a2a", corner_radius=18)
-        hero.pack(fill="x", padx=18, pady=(18, 10))
-        hero.columnconfigure(1, weight=1)
+        if self._set_widget_transparency(widget, opacity):
+            self._transparency_targets.append((widget, opacity))
+
+    def _set_widget_transparency(self, widget, opacity: Optional[float] = None) -> bool:
+        if not self.transparency_enabled:
+            return False
+
+        chroma_key = "#000001"
+        previous_bg = None
+        try:
+            previous_bg = widget.cget("bg_color")
+        except Exception:
+            previous_bg = None
+
+        try:
+            widget.configure(bg_color=chroma_key)
+        except Exception:
+            return False
+
+        try:
+            if opacity is None:
+                pywinstyles.set_opacity(widget, color=chroma_key)
+            else:
+                pywinstyles.set_opacity(widget, value=opacity, color=chroma_key)
+            return True
+        except Exception:
+            if previous_bg is not None:
+                try:
+                    widget.configure(bg_color=previous_bg)
+                except Exception:
+                    pass
+            return False
+
+    def _reapply_transparency_targets(self) -> None:
+        if not self.transparency_enabled:
+            return
+
+        for widget, opacity in list(self._transparency_targets):
+            try:
+                if widget.winfo_exists():
+                    self._set_widget_transparency(widget, opacity)
+            except Exception:
+                continue
+
+    def _build_ui(self) -> None:
+        self.configure(fg_color="#102437")
+
+        self.bg_label = ctk.CTkLabel(self, text="")
+        self.bg_label.place(x=0, y=0, relwidth=1, relheight=1)
+        self._load_background_image()
 
         if os.path.isfile(LOGO_PNG_PATH):
             try:
                 logo_pil = Image.open(LOGO_PNG_PATH)
-                self.logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(84, 84))
-                ctk.CTkLabel(hero, image=self.logo_image, text="").grid(
-                    row=0, column=0, rowspan=2, padx=(18, 14), pady=14
-                )
+                self.logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(260, 260))
+                self.logo_label = ctk.CTkLabel(self, image=self.logo_image, text="", fg_color="transparent", bg_color="transparent")
+                self.logo_label.place(relx=0.5, rely=0.28, anchor="center")
+                self._apply_widget_transparency(self.logo_label)
             except Exception:
                 pass
 
-        ctk.CTkLabel(
-            hero,
-            text="Strike Platoon | Arma 3 Launcher",
-            font=ctk.CTkFont(size=30, weight="bold"),
-            text_color="#f7f4e8",
-        ).grid(row=0, column=1, padx=(0, 16), pady=(16, 2), sticky="w")
-
-        ctk.CTkLabel(
-            hero,
-            text="Direktstart mit Preset",
-            font=ctk.CTkFont(size=14),
-            text_color="#8cb6d6",
-        ).grid(row=1, column=1, padx=(0, 16), pady=(0, 16), sticky="w")
-
-        stats_frame = ctk.CTkFrame(self, fg_color="#101827", corner_radius=16)
-        stats_frame.pack(fill="x", padx=18, pady=(0, 10))
-        for column in range(3):
-            stats_frame.columnconfigure(column, weight=1)
-
-        self.version_value_lbl = self._create_stat_card(
-            stats_frame, 0, "Launcher-Version", LAUNCHER_VERSION, "#35518c"
-        )
-        self.server_value_lbl = self._create_stat_card(
-            stats_frame, 1, "Spieler online", "Lade...", "#2b8e49"
-        )
-        self.mod_count_lbl = self._create_stat_card(
-            stats_frame, 2, "Mods in Liste", "Lade...", "#775d2a"
-        )
-
-        # Pfad-Karte
-        path_frame = ctk.CTkFrame(self, fg_color="#121f33", corner_radius=14)
-        path_frame.pack(fill="x", padx=18, pady=(2, 10))
-
-        ctk.CTkLabel(path_frame, text="Arma 3 EXE", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w"
-        )
-        self.ent_arma = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_arma.grid(row=0, column=1, padx=6, pady=(12, 6), sticky="ew")
-
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_arma,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=0, column=2, padx=(6, 8), pady=(12, 6))
-
-        ctk.CTkLabel(path_frame, text="TS3 EXE", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=1, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
-        )
-        self.ent_ts = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_ts.grid(row=1, column=1, padx=6, pady=(0, 12), sticky="ew")
-
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_ts,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=1, column=2, padx=(6, 8), pady=(0, 12))
-
-        ctk.CTkLabel(path_frame, text="TS3 Pluginpfad", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=2, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
-        )
-        self.ent_ts_plugins = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_ts_plugins.grid(row=2, column=1, padx=6, pady=(0, 12), sticky="ew")
-
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_ts_plugins,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=2, column=2, padx=(6, 8), pady=(0, 12))
-
-        ctk.CTkButton(
-            path_frame, text="Auto erkennen", width=130, command=self._auto_detect_paths,
-            fg_color="#375a2d", hover_color="#466f39"
-        ).grid(row=0, column=3, padx=(6, 14), pady=(12, 6))
-        ctk.CTkButton(
-            path_frame, text="Pfade speichern", width=130, command=self._save_paths,
-            fg_color="#375a2d", hover_color="#466f39"
-        ).grid(row=1, column=3, padx=(6, 14), pady=(0, 12))
-
-        path_frame.columnconfigure(1, weight=1)
-
-        # Aktionsleiste
-        action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        action_frame.pack(fill="x", padx=18, pady=(0, 8))
-
-        self.log_btn = ctk.CTkButton(
-            action_frame,
-            text="Arma3 Logordner",
-            width=140, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#3e3d52", hover_color="#4f4e66",
-            command=self._open_log_folder,
-        )
-        self.log_btn.pack(side="left")
-
-        self.toggle_log_btn = ctk.CTkButton(
-            action_frame,
-            text="Log anzeigen",
-            width=120, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#5f4a1f", hover_color="#775d2a",
-            command=self._toggle_log_visibility,
-        )
-        self.toggle_log_btn.pack(side="left", padx=(8, 0))
-
-        self.discord_btn = ctk.CTkButton(
-            action_frame,
-            text="Discord",
-            width=120, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#35518c", hover_color="#4464a7",
-            command=lambda: webbrowser.open(DISCORD_URL),
-        )
-        self.discord_btn.pack(side="left", padx=(8, 0))
-
         self.launch_btn = ctk.CTkButton(
-            action_frame,
-            text="SPIEL STARTEN",
-            width=260, height=50,
-            font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color="#2b8e49", hover_color="#236f3a",
-            command=self._start_launch,
+            self,
+            text="Server betreten",
+            width=300,
+            height=60,
+            corner_radius=999,
+            border_width=1,
+            border_color="#d1e5c3",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            fg_color="#2f8f5f",
+            bg_color="transparent",
+            hover_color="#236f4a",
+            command=self._start_server_launch,
         )
-        self.launch_btn.pack(side="right")
+        self.launch_btn.place(relx=0.5, rely=0.50, anchor="center")
+        self._apply_widget_transparency(self.launch_btn)
 
-        # Status
+        self.singleplayer_btn = ctk.CTkButton(
+            self,
+            text="Singleplayer starten",
+            width=220,
+            height=34,
+            corner_radius=999,
+            border_width=1,
+            border_color="#9cb2c8",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#2a3f56",
+            bg_color="transparent",
+            hover_color="#35526f",
+            command=self._start_singleplayer_launch,
+        )
+        self.singleplayer_btn.place(relx=0.5, rely=0.57, anchor="center")
+        self._apply_widget_transparency(self.singleplayer_btn)
+
         self.status_lbl = ctk.CTkLabel(
             self,
             text="Bereit",
             font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#95b9d8",
+            text_color="#b4cadf",
+            fg_color="transparent",
+            bg_color="transparent",
         )
-        self.status_lbl.pack(anchor="w", padx=22, pady=(0, 6))
+        self.status_lbl.place(relx=0.5, rely=0.64, anchor="center")
+        self._apply_widget_transparency(self.status_lbl)
 
-        # Log (initial versteckt)
+        self.path_frame = ctk.CTkFrame(
+            self,
+            fg_color="#102437",
+            corner_radius=0,
+            border_width=1,
+            border_color="#3d5c7d",
+        )
+        self.path_frame.pack(fill="x", padx=24, pady=(0, 10))
+
+        ctk.CTkLabel(self.path_frame, text="Arma 3 EXE", width=130, anchor="w", text_color="#d7e3f0").grid(
+            row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w"
+        )
+        self.ent_arma = ctk.CTkEntry(self.path_frame, fg_color="#18324a", border_color="#6f8baa")
+        self.ent_arma.grid(row=0, column=1, padx=6, pady=(12, 6), sticky="ew")
+
+        ctk.CTkButton(
+            self.path_frame, text="...", width=36, command=self._browse_arma,
+            fg_color="#2d4e74", hover_color="#3e6694", border_width=1, border_color="#6a859f"
+        ).grid(row=0, column=2, padx=(6, 8), pady=(12, 6))
+
+        ctk.CTkLabel(self.path_frame, text="TS3 EXE", width=130, anchor="w", text_color="#d7e3f0").grid(
+            row=1, column=0, padx=(14, 8), pady=(0, 6), sticky="w"
+        )
+        self.ent_ts = ctk.CTkEntry(self.path_frame, fg_color="#18324a", border_color="#6f8baa")
+        self.ent_ts.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="ew")
+
+        ctk.CTkButton(
+            self.path_frame, text="...", width=36, command=self._browse_ts,
+            fg_color="#2d4e74", hover_color="#3e6694", border_width=1, border_color="#6a859f"
+        ).grid(row=1, column=2, padx=(6, 8), pady=(0, 6))
+
+        ctk.CTkLabel(self.path_frame, text="TS3 Pluginpfad", width=130, anchor="w", text_color="#d7e3f0").grid(
+            row=2, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
+        )
+        self.ent_ts_plugins = ctk.CTkEntry(self.path_frame, fg_color="#18324a", border_color="#6f8baa")
+        self.ent_ts_plugins.grid(row=2, column=1, padx=6, pady=(0, 12), sticky="ew")
+
+        ctk.CTkButton(
+            self.path_frame, text="...", width=36, command=self._browse_ts_plugins,
+            fg_color="#2d4e74", hover_color="#3e6694", border_width=1, border_color="#6a859f"
+        ).grid(row=2, column=2, padx=(6, 8), pady=(0, 12))
+
+        ctk.CTkButton(
+            self.path_frame,
+            text="Auto erkennen",
+            width=132,
+            command=self._auto_detect_paths,
+            fg_color="#315d40",
+            hover_color="#3f7752",
+            border_width=1,
+            border_color="#8fb39b",
+        ).grid(row=0, column=3, padx=(6, 14), pady=(12, 6))
+        ctk.CTkButton(
+            self.path_frame,
+            text="Pfade speichern",
+            width=132,
+            command=self._save_paths,
+            fg_color="#315d40",
+            hover_color="#3f7752",
+            border_width=1,
+            border_color="#8fb39b",
+        ).grid(row=1, column=3, padx=(6, 14), pady=(0, 6))
+        self.path_frame.columnconfigure(1, weight=1)
+
+        bottom_bar = ctk.CTkFrame(
+            self,
+            fg_color="#0f2238",
+            corner_radius=0,
+            border_width=1,
+            border_color="#3a5678",
+        )
+        self.bottom_bar = bottom_bar
+        bottom_bar.pack(side="bottom", fill="x", padx=24, pady=(0, 12))
+        for idx in range(4):
+            bottom_bar.grid_columnconfigure(idx, weight=1)
+
+        self.open_arma_folder_btn = ctk.CTkButton(
+            bottom_bar,
+            text="Arma 3 Ordner öffnen",
+            height=42,
+            corner_radius=12,
+            fg_color="#27456b",
+            hover_color="#355a87",
+            border_width=1,
+            border_color="#6a859f",
+            command=self._open_arma_folder,
+        )
+        self.open_arma_folder_btn.grid(row=0, column=0, padx=(10, 6), pady=10, sticky="ew")
+
+        self.toggle_log_btn = ctk.CTkButton(
+            bottom_bar,
+            text="Launcher Logs",
+            height=42,
+            corner_radius=12,
+            fg_color="#5a4826",
+            hover_color="#6d5a32",
+            border_width=1,
+            border_color="#af9e7b",
+            command=self._toggle_log_visibility,
+        )
+        self.toggle_log_btn.grid(row=0, column=1, padx=6, pady=10, sticky="ew")
+
+        self.discord_btn = ctk.CTkButton(
+            bottom_bar,
+            text="Discord",
+            height=42,
+            corner_radius=12,
+            fg_color="#28547c",
+            hover_color="#376a9a",
+            border_width=1,
+            border_color="#7d9ebf",
+            command=lambda: webbrowser.open(DISCORD_URL),
+        )
+        self.discord_btn.grid(row=0, column=2, padx=6, pady=10, sticky="ew")
+
+        self.path_toggle_btn = ctk.CTkButton(
+            bottom_bar,
+            text="Pfade anpassen",
+            height=42,
+            corner_radius=12,
+            fg_color="#2f5d41",
+            hover_color="#3e7653",
+            border_width=1,
+            border_color="#88a794",
+            command=self._toggle_paths_visibility,
+        )
+        self.path_toggle_btn.grid(row=0, column=3, padx=(6, 10), pady=10, sticky="ew")
+
         self.log_box = ctk.CTkTextbox(
             self,
             font=ctk.CTkFont(family="Consolas", size=11),
-            fg_color="#0b1422",
-            border_color="#223c5c",
+            fg_color="#102437",
+            border_color="#3d5c7d",
             border_width=1,
-            height=260,
+            corner_radius=0,
+            height=220,
         )
         self.log_box.configure(state="disabled")
 
+        self.path_frame.pack_forget()
         self._load_paths_into_ui()
 
-    def _create_stat_card(
-        self,
-        parent: ctk.CTkFrame,
-        column: int,
-        title: str,
-        value: str,
-        accent_color: str,
-    ) -> ctk.CTkLabel:
-        card = ctk.CTkFrame(parent, fg_color="#121f33", corner_radius=12)
-        card.grid(row=0, column=column, padx=8, pady=8, sticky="nsew")
+    def _load_background_image(self) -> None:
+        bg_path = self._resolve_background_image_path()
+        if not bg_path:
+            return
 
-        ctk.CTkLabel(
-            card,
-            text=title,
-            font=ctk.CTkFont(size=12),
-            text_color="#9ab3ca",
-        ).pack(anchor="w", padx=14, pady=(12, 2))
+        try:
+            self._background_source_image = Image.open(bg_path)
+        except Exception:
+            self._background_source_image = None
+            return
 
-        value_label = ctk.CTkLabel(
-            card,
-            text=value,
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color="#f7f4e8",
-        )
-        value_label.pack(anchor="w", padx=14, pady=(0, 4))
+        self._update_background_image()
 
-        ctk.CTkLabel(
-            card,
-            text=" ",
-            fg_color=accent_color,
-            corner_radius=999,
-            width=40,
-            height=4,
-        ).pack(anchor="w", padx=14, pady=(0, 12))
+    def _on_window_resize(self, event) -> None:
+        if event.widget is not self:
+            return
+        if self._bg_resize_job is not None:
+            self.after_cancel(self._bg_resize_job)
+        self._bg_resize_job = self.after(80, self._update_background_image)
 
-        return value_label
+    def _update_background_image(self) -> None:
+        self._bg_resize_job = None
+        if self._background_source_image is None:
+            return
+
+        width = max(self.winfo_width(), 1)
+        height = max(self.winfo_height(), 1)
+
+        img_ratio = self._background_source_image.width / max(self._background_source_image.height, 1)
+        window_ratio = width / max(height, 1)
+
+        if window_ratio > img_ratio:
+            scaled_width = width
+            scaled_height = int(width / img_ratio)
+        else:
+            scaled_height = height
+            scaled_width = int(height * img_ratio)
+
+        resampling_module = getattr(Image, "Resampling", Image)
+        resized = self._background_source_image.resize((scaled_width, scaled_height), resampling_module.LANCZOS)
+        left = max((scaled_width - width) // 2, 0)
+        top = max((scaled_height - height) // 2, 0)
+        cropped = resized.crop((left, top, left + width, top + height))
+        self.background_image = ctk.CTkImage(light_image=cropped, dark_image=cropped, size=(width, height))
+        self.bg_label.configure(image=self.background_image)
+
+    def _toggle_paths_visibility(self) -> None:
+        self.paths_visible = not self.paths_visible
+        if self.paths_visible:
+            self.path_frame.pack(side="bottom", fill="x", padx=24, pady=(0, 10))
+            self.path_frame.lift(self.bottom_bar)
+            self.path_toggle_btn.configure(text="Pfade ausblenden")
+        else:
+            self.path_frame.pack_forget()
+            self.path_toggle_btn.configure(text="Pfade anpassen")
 
     def _schedule_info_refresh(self, initial_delay_ms: int = 60000) -> None:
         self.after(initial_delay_ms, self._refresh_info_async)
@@ -689,11 +827,13 @@ class LauncherApp(ctk.CTk):
     def _toggle_log_visibility(self) -> None:
         self.log_visible = not self.log_visible
         if self.log_visible:
-            self.log_box.pack(fill="both", expand=True, padx=18, pady=(0, 16))
-            self.toggle_log_btn.configure(text="Log verstecken")
+            self.log_box.pack(side="bottom", fill="x", padx=24, pady=(0, 16))
+            self.log_box.configure(height=220)
+            self.log_box.lift(self.bottom_bar)
+            self.toggle_log_btn.configure(text="Logs ausblenden")
         else:
             self.log_box.pack_forget()
-            self.toggle_log_btn.configure(text="Log anzeigen")
+            self.toggle_log_btn.configure(text="Launcher Logs")
 
     def _log(self, msg: str) -> None:
         if not hasattr(self, "log_box"):
@@ -742,6 +882,19 @@ class LauncherApp(ctk.CTk):
             self._log(f"[INFO] Log-Ordner geoeffnet: {log_dir}")
         else:
             self._log(f"[WARN] Log-Ordner nicht gefunden: {log_dir}")
+
+    def _open_arma_folder(self) -> None:
+        arma_exe = self.ent_arma.get().strip()
+        if not arma_exe:
+            self._log("[WARN] Kein Arma 3 Pfad gesetzt. Bitte erst unter 'Pfade anpassen' eintragen.")
+            return
+
+        arma_dir = os.path.dirname(arma_exe)
+        if os.path.isdir(arma_dir):
+            os.startfile(arma_dir)
+            self._log(f"[INFO] Arma 3 Ordner geoeffnet: {arma_dir}")
+        else:
+            self._log(f"[WARN] Arma 3 Ordner nicht gefunden: {arma_dir}")
 
     def _load_paths_into_ui(self) -> None:
         arma_cfg = self.cfg.get("arma3_exe", "")
@@ -1341,7 +1494,18 @@ class LauncherApp(ctk.CTk):
         self._log(f"[OK] TeamSpeak gestartet (PID: {self.ts_proc.pid})")
         return True
 
-    def _start_launch(self) -> None:
+    def _set_launch_buttons_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        self.launch_btn.configure(state=state)
+        self.singleplayer_btn.configure(state=state)
+
+    def _start_server_launch(self) -> None:
+        self._start_launch_mode(join_server=True, use_teamspeak=True)
+
+    def _start_singleplayer_launch(self) -> None:
+        self._start_launch_mode(join_server=False, use_teamspeak=False)
+
+    def _start_launch_mode(self, join_server: bool, use_teamspeak: bool) -> None:
         self.selected_arma_exe = self.ent_arma.get().strip()
         self.selected_ts_exe = self.ent_ts.get().strip()
         self.selected_ts_plugins_dir = self.ent_ts_plugins.get().strip()
@@ -1349,11 +1513,15 @@ class LauncherApp(ctk.CTk):
         self.cfg["teamspeak_exe"] = self.selected_ts_exe
         self.cfg["teamspeak_plugins_dir"] = self.selected_ts_plugins_dir
         save_config(self.cfg)
-        self.launch_btn.configure(state="disabled")
+        self._set_launch_buttons_enabled(False)
         self._set_status("Starte...", "#ff9800")
-        threading.Thread(target=self._launch_worker, daemon=True).start()
+        threading.Thread(
+            target=self._launch_worker,
+            args=(join_server, use_teamspeak),
+            daemon=True,
+        ).start()
 
-    def _launch_worker(self) -> None:
+    def _launch_worker(self, join_server: bool, use_teamspeak: bool) -> None:
         arma_started = False
         try:
             self._log("[INFO] Pruefe Arma 3 Pfad...")
@@ -1443,7 +1611,7 @@ class LauncherApp(ctk.CTk):
                     else:
                         self._log(f"[INFO] Uebersprungen: {mod['name']} ({mod['id']})")
 
-                self._log("[INFO] Nach dem Abonnieren bitte erneut auf SPIEL STARTEN klicken.")
+                self._log("[INFO] Nach dem Abonnieren bitte erneut starten.")
                 return
 
             invalid_addons = [
@@ -1466,26 +1634,32 @@ class LauncherApp(ctk.CTk):
             args = [
                 arma3_exe,
                 f"-mod={';'.join(mod_paths)}",
-                f"-connect={SERVER_IP}",
-                f"-port={SERVER_PORT}",
-                f"-password={SERVER_PW}",
             ]
 
-            self._log(
-                f"\n[CMD] {arma3_exe}\n"
-                f"      -mod=({len(mod_paths)} Mods)\n"
-                f"      -connect={SERVER_IP} -port={SERVER_PORT}\n"
-            )
+            if join_server:
+                args.extend([
+                    f"-connect={SERVER_IP}",
+                    f"-port={SERVER_PORT}",
+                    f"-password={SERVER_PW}",
+                ])
+
+            self._log(f"\n[CMD] {arma3_exe}")
+            self._log(f"      -mod=({len(mod_paths)} Mods)")
+            if join_server:
+                self._log(f"      -connect={SERVER_IP} -port={SERVER_PORT}")
+            else:
+                self._log("      [MODE] Singleplayer (kein TeamSpeak, kein Server-Connect)")
             # Jeden Mod-Pfad einzeln ausgeben damit man sieht was übergeben wird
             for i, p in enumerate(mod_paths, 1):
                 self._log(f"      [{i:02d}] {p}")
 
-            self._log("\n[INFO] Starte TeamSpeak 3...")
-            ts_started = self._start_teamspeak_managed()
-            if not ts_started:
-                self._set_status("TeamSpeak fehlt", "#f44336")
-                self._log("[INFO] Start abgebrochen bis TeamSpeak installiert ist.")
-                return
+            if use_teamspeak:
+                self._log("\n[INFO] Starte TeamSpeak 3...")
+                ts_started = self._start_teamspeak_managed()
+                if not ts_started:
+                    self._set_status("TeamSpeak fehlt", "#f44336")
+                    self._log("[INFO] Start abgebrochen bis TeamSpeak installiert ist.")
+                    return
 
             self._log("[INFO] Starte Arma 3...")
             try:
@@ -1516,7 +1690,7 @@ class LauncherApp(ctk.CTk):
                 self.ts_proc = None
         finally:
             if not arma_started:
-                self.after(0, lambda: self.launch_btn.configure(state="normal"))
+                self.after(0, lambda: self._set_launch_buttons_enabled(True))
 
     def _watch_process(self, proc: subprocess.Popen) -> None:
         """Wartet auf Arma 3 und liest danach den neuesten RPT-Log."""
@@ -1570,7 +1744,7 @@ class LauncherApp(ctk.CTk):
 
         # Neuesten RPT-Log lesen und letzte Zeilen anzeigen
         self._read_rpt_log()
-        self.after(0, lambda: self.launch_btn.configure(state="normal"))
+        self.after(0, lambda: self._set_launch_buttons_enabled(True))
 
     def _read_rpt_log(self) -> None:
         """Liest den neuesten Arma 3 RPT-Log und zeigt die letzten Zeilen."""

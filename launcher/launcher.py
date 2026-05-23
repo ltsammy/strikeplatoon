@@ -47,7 +47,6 @@ GITHUB_API_HEADERS = {
     "Accept": "application/vnd.github+json",
     "User-Agent": "104Launcher",
 }
-STEAM_WEBAPI_KEY_URL = "https://steamcommunity.com/dev/apikey"
 ARMA3_APP_ID  = "107410"
 APP_INSTALL_DIR = os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "104Launcher")
 INSTALLED_EXE_PATH = os.path.join(APP_INSTALL_DIR, "launcher.exe")
@@ -84,7 +83,6 @@ DEFAULT_CONFIG = {
     "arma3_exe": "",
     "teamspeak_exe": "",
     "teamspeak_plugins_dir": "",
-    "steam_webapi_key": "",
 }
 
 
@@ -387,7 +385,6 @@ class LauncherApp(ctk.CTk):
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
-        self.selected_steam_webapi_key = ""
 
         self.title("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
@@ -431,7 +428,7 @@ class LauncherApp(ctk.CTk):
 
         ctk.CTkLabel(
             hero,
-            text=f"Direktstart mit Preset, Server {SERVER_IP}:{SERVER_PORT}",
+            text="Direktstart mit Preset",
             font=ctk.CTkFont(size=14),
             text_color="#8cb6d6",
         ).grid(row=1, column=1, padx=(0, 16), pady=(0, 16), sticky="w")
@@ -481,26 +478,6 @@ class LauncherApp(ctk.CTk):
             path_frame, text="Pfade speichern", width=130, command=self._save_paths,
             fg_color="#375a2d", hover_color="#466f39"
         ).grid(row=1, column=3, padx=(6, 14), pady=(0, 12))
-
-        ctk.CTkLabel(path_frame, text="Steam WebAPI Key", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=3, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
-        )
-        self.ent_steam_webapi_key = ctk.CTkEntry(
-            path_frame,
-            fg_color="#0d1524",
-            border_color="#27405f",
-            show="*",
-        )
-        self.ent_steam_webapi_key.grid(row=3, column=1, padx=6, pady=(0, 12), sticky="ew")
-
-        ctk.CTkButton(
-            path_frame,
-            text="Key holen",
-            width=90,
-            command=lambda: webbrowser.open(STEAM_WEBAPI_KEY_URL),
-            fg_color="#254367",
-            hover_color="#315781",
-        ).grid(row=3, column=2, padx=(6, 8), pady=(0, 12))
 
         path_frame.columnconfigure(1, weight=1)
 
@@ -621,7 +598,6 @@ class LauncherApp(ctk.CTk):
         arma_cfg = self.cfg.get("arma3_exe", "")
         ts_cfg = self.cfg.get("teamspeak_exe", "")
         plugins_cfg = self.cfg.get("teamspeak_plugins_dir", "")
-        webapi_cfg = self.cfg.get("steam_webapi_key", "")
 
         if arma_cfg and os.path.isfile(arma_cfg):
             self.ent_arma.delete(0, "end")
@@ -635,10 +611,6 @@ class LauncherApp(ctk.CTk):
             self.ent_ts_plugins.delete(0, "end")
             self.ent_ts_plugins.insert(0, plugins_cfg)
 
-        if webapi_cfg:
-            self.ent_steam_webapi_key.delete(0, "end")
-            self.ent_steam_webapi_key.insert(0, webapi_cfg)
-
         if not self.ent_arma.get().strip() or not self.ent_ts.get().strip() or not self.ent_ts_plugins.get().strip():
             self._auto_detect_paths(save=False)
 
@@ -646,11 +618,9 @@ class LauncherApp(ctk.CTk):
         arma_path = self.ent_arma.get().strip()
         ts_path = self.ent_ts.get().strip()
         ts_plugins_path = self.ent_ts_plugins.get().strip()
-        steam_webapi_key = self.ent_steam_webapi_key.get().strip()
         self.cfg["arma3_exe"] = arma_path
         self.cfg["teamspeak_exe"] = ts_path
         self.cfg["teamspeak_plugins_dir"] = ts_plugins_path
-        self.cfg["steam_webapi_key"] = steam_webapi_key
         save_config(self.cfg)
         self._log("[OK] Pfade gespeichert.")
 
@@ -842,38 +812,6 @@ class LauncherApp(ctk.CTk):
         except Exception as exc:
             self._log(f"[FEHLER] TFAR-Installer konnte nicht gestartet werden: {exc}")
             return False
-
-    def _subscribe_workshop_items(self, mods: list[dict], webapi_key: str) -> tuple[list[dict], list[dict]]:
-        """Abonniert Workshop-Items direkt per Steam WebAPI.
-
-        Returns:
-            (successful_mods, failed_mods)
-        """
-        success: list[dict] = []
-        failed: list[dict] = []
-
-        for mod in mods:
-            mod_id = mod["id"]
-            mod_name = mod["name"]
-            try:
-                response = requests.post(
-                    "https://api.steampowered.com/IPublishedFileService/Subscribe/v1/",
-                    data={
-                        "key": webapi_key,
-                        "publishedfileid": mod_id,
-                        "list_type": 1,
-                        "notify_client": 1,
-                    },
-                    timeout=20,
-                )
-                response.raise_for_status()
-                success.append(mod)
-                self._log(f"[OK] Auto-Abo gesendet: {mod_name} ({mod_id})")
-            except Exception as exc:
-                failed.append(mod)
-                self._log(f"[WARN] Auto-Abo fehlgeschlagen: {mod_name} ({mod_id}) - {exc}")
-
-        return success, failed
 
     def _parse_version_parts(self, version_text: str) -> tuple[int, ...]:
         """Versionstext in numerische Teile umwandeln, z. B. 1.2.3 -> (1, 2, 3)."""
@@ -1170,11 +1108,9 @@ class LauncherApp(ctk.CTk):
         self.selected_arma_exe = self.ent_arma.get().strip()
         self.selected_ts_exe = self.ent_ts.get().strip()
         self.selected_ts_plugins_dir = self.ent_ts_plugins.get().strip()
-        self.selected_steam_webapi_key = self.ent_steam_webapi_key.get().strip()
         self.cfg["arma3_exe"] = self.selected_arma_exe
         self.cfg["teamspeak_exe"] = self.selected_ts_exe
         self.cfg["teamspeak_plugins_dir"] = self.selected_ts_plugins_dir
-        self.cfg["steam_webapi_key"] = self.selected_steam_webapi_key
         save_config(self.cfg)
         self.launch_btn.configure(state="disabled")
         self._set_status("Starte...", "#ff9800")
@@ -1258,24 +1194,6 @@ class LauncherApp(ctk.CTk):
 
                 self._set_status("Fehlende Mods", "#f44336")
                 self._log("[INFO] Starte Abo-Assistent (ein Mod nach dem anderen)...")
-
-                webapi_key = self.selected_steam_webapi_key or self.cfg.get("steam_webapi_key", "")
-                if webapi_key:
-                    auto_subscribe = self._ask_yes_no_threadsafe(
-                        "Mods automatisch abonnieren",
-                        f"{len(missing)} Mod(s) fehlen. Soll der Launcher zuerst versuchen, sie automatisch per Steam WebAPI zu abonnieren?",
-                    )
-                    if auto_subscribe:
-                        self._log("[INFO] Versuche automatische Workshop-Abos...")
-                        _, failed_auto = self._subscribe_workshop_items(missing, webapi_key)
-                        if not failed_auto:
-                            self._log("[OK] Alle fehlenden Mods wurden zum Abonnieren an Steam uebergeben.")
-                            self._log("[INFO] Warte kurz auf Steam Sync und klicke dann erneut auf SPIEL STARTEN.")
-                            return
-                        missing = failed_auto
-                        self._log("[WARN] Ein Teil der Mods konnte nicht automatisch abonniert werden. Fallback auf manuelle Workshop-Seiten.")
-                else:
-                    self._log("[INFO] Kein Steam WebAPI Key gesetzt. Auto-Abo nicht verfuegbar.")
 
                 for mod in missing:
                     ask = self._ask_yes_no_threadsafe(

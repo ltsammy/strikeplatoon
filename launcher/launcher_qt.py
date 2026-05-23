@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.parse import unquote
 import webbrowser
 from typing import Optional
 
@@ -594,7 +595,8 @@ class LauncherWindow(QMainWindow):
                 for entry in os.listdir(root):
                     profile_dir = os.path.join(root, entry)
                     if os.path.isdir(profile_dir):
-                        names.add(entry)
+                        decoded_name = unquote(entry).strip()
+                        names.add(decoded_name or entry)
             except OSError:
                 continue
 

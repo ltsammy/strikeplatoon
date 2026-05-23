@@ -11,6 +11,7 @@ from ctypes import wintypes
 import glob
 import os
 import re
+import sqlite3
 import socket
 import subprocess
 import sys
@@ -947,37 +948,41 @@ class LauncherWindow(QMainWindow):
         if not appdata:
             return
 
-        settings_file = os.path.join(appdata, "TS3Client", "settings.ini")
-        if not os.path.isfile(settings_file):
+        settings_db = os.path.join(appdata, "TS3Client", "settings.db")
+        if not os.path.isfile(settings_db):
+            self._log("[WARN] TeamSpeak settings.db nicht gefunden. Sound Pack konnte nicht gesetzt werden.")
             return
 
         try:
-            with open(settings_file, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read()
-        except OSError:
-            return
+            now = int(time.time())
+            con = sqlite3.connect(settings_db, timeout=5)
+            cur = con.cursor()
 
-        changed = False
-        if re.search(r"(?mi)^\s*SoundPack\s*=", content):
-            new_content = re.sub(r"(?mi)^\s*SoundPack\s*=.*$", "SoundPack=Sounds deactivated", content)
-            if new_content != content:
-                content = new_content
-                changed = True
-        else:
-            if content and not content.endswith("\n"):
-                content += "\n"
-            content += "SoundPack=Sounds deactivated\n"
-            changed = True
+            cur.execute(
+                "UPDATE Notifications SET value=?, timestamp=? WHERE key=?",
+                ("nosounds", now, "SoundPack"),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    "INSERT INTO Notifications (timestamp, key, value) VALUES (?, ?, ?)",
+                    (now, "SoundPack", "nosounds"),
+                )
 
-        if not changed:
-            return
+            cur.execute(
+                "UPDATE Connecting SET value=?, timestamp=? WHERE key=?",
+                ("nosounds", now, "LastUsedServerSoundPack"),
+            )
+            if cur.rowcount == 0:
+                cur.execute(
+                    "INSERT INTO Connecting (timestamp, key, value) VALUES (?, ?, ?)",
+                    (now, "LastUsedServerSoundPack", "nosounds"),
+                )
 
-        try:
-            with open(settings_file, "w", encoding="utf-8") as fh:
-                fh.write(content)
-            self._log("[INFO] TeamSpeak Sound Pack auf 'Sounds deactivated' gesetzt.")
-        except OSError as exc:
-            self._log(f"[WARN] TeamSpeak settings.ini konnte nicht aktualisiert werden: {exc}")
+            con.commit()
+            con.close()
+            self._log("[INFO] TeamSpeak Sound Pack auf 'Sounds deactivated' gesetzt (settings.db).")
+        except Exception as exc:
+            self._log(f"[WARN] TeamSpeak settings.db konnte nicht aktualisiert werden: {exc}")
 
     def _connect_teamspeak_server(self, ts_exe: str, ts_url: str) -> bool:
         if webbrowser.open(ts_url):
@@ -1378,40 +1383,13 @@ class LauncherWindow(QMainWindow):
                 "}\n"
                 "Show-Step 94 'Warte kurz auf Dateifreigabe/Scanner... '\n"
                 "Start-Sleep -Seconds 3\n"
-                "Show-Step 95 'Starte den aktualisierten Launcher neu...'\n"
-                "$started = $false\n"
-                "for ($attempt = 1; $attempt -le 5; $attempt++) {\n"
-                "    try {\n"
-                "        $proc = Start-Process -FilePath $target -WorkingDirectory (Split-Path -Path $target -Parent) -PassThru\n"
-                "        Start-Sleep -Seconds 3\n"
-                "        if ($proc -and (-not $proc.HasExited)) {\n"
-                "            $started = $true\n"
-                "            break\n"
-                "        }\n"
-                "        Write-Host '      Launcher ist direkt nach dem Start wieder beendet worden; neuer Versuch...'\n"
-                "        Write-Log (\"Launcher nach Start direkt beendet, Versuch {0}\" -f $attempt)\n"
-                "    } catch {\n"
-                "        Write-Host ('      Start fehlgeschlagen: {0}' -f $_.Exception.Message)\n"
-                "        Write-Log (\"Launcher-Start fehlgeschlagen, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
-                "    }\n"
-                "    Start-Sleep -Seconds 3\n"
-                "}\n"
-                "if (-not $started) {\n"
-                "    Show-Step 100 'Launcher konnte nicht neu gestartet werden.'\n"
-                "    Write-Host ''\n"
-                "    Write-Host 'Der Launcher wurde ersetzt, konnte aber nicht automatisch neu starten.'\n"
-                "    Write-Host 'Bitte starte ihn manuell. Details stehen in:'\n"
-                "    Write-Host $log\n"
-                "    Start-Sleep -Seconds 10\n"
-                "    exit 1\n"
-                "}\n"
-                "Show-Step 100 'Fertig. Der Launcher wird jetzt neu gestartet.'\n"
+                "Show-Step 100 'Update abgeschlossen.'\n"
                 "Write-Host ''\n"
-                "Write-Host 'Update abgeschlossen.'\n"
+                "Write-Host 'Update abgeschlossen. Bitte den Launcher jetzt manuell starten.'\n"
                 "if (Test-Path $backup) { Remove-Item -Path $backup -Force -ErrorAction SilentlyContinue }\n"
                 "if (Test-Path $source) { Remove-Item -Path $source -Force -ErrorAction SilentlyContinue }\n"
                 "Remove-Item -Path $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
-                "Start-Sleep -Seconds 3\n"
+                "Start-Sleep -Seconds 6\n"
             )
 
             with open(updater_script, "w", encoding="utf-8") as fh:

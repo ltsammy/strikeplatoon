@@ -5,7 +5,7 @@ a = Analysis(
     ['launcher\\launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[('launcher/logo.png', '.'), ('launcher/logo.ico', '.')],
+    datas=[('background.mp4', '.'), ('launcher/logo.png', '.'), ('launcher/logo.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

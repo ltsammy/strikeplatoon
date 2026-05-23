@@ -74,7 +74,7 @@ jobs:
 
       - name: Build launcher EXE
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --name launcher --distpath dist --workpath build/pyinstaller --specpath . --add-data "launcher/logo.png;." --add-data "launcher/logo.ico;." --icon launcher/logo.ico launcher/launcher.py
+          python -m PyInstaller --noconfirm --clean --onefile --windowed --name launcher --distpath dist --workpath build/pyinstaller --specpath . --add-data "background.mp4;." --add-data "launcher/logo.png;." --add-data "launcher/logo.ico;." --icon launcher/logo.ico launcher/launcher.py
 
       - name: Create GitHub release and upload binaries
         uses: softprops/action-gh-release@v2

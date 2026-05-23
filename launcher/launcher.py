@@ -7,16 +7,16 @@ import glob
 import csv
 import ctypes
 import json
+import importlib
 import os
 import re
 import shutil
-import socket
-import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import tkinter as tk
 import webbrowser
 import winreg
 from tkinter import filedialog, messagebox
@@ -28,6 +28,11 @@ from bs4 import BeautifulSoup
 from PIL import Image
 
 from version import LAUNCHER_VERSION
+
+try:
+    vlc = importlib.import_module("vlc")
+except Exception:
+    vlc = None
 
 # ---------------------------------------------------------------------------
 # Hardcoded Konfiguration
@@ -68,7 +73,8 @@ UNINSTALL_REG_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Strike
 APP_BASE_DIR = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
 LOGO_PNG_PATH = os.path.join(APP_BASE_DIR, "logo.png")
 LOGO_ICO_PATH = os.path.join(APP_BASE_DIR, "logo.ico")
-SERVER_QUERY_PORTS = (int(SERVER_PORT), int(SERVER_PORT) + 1)
+BACKGROUND_VIDEO_PATH = os.path.join(APP_BASE_DIR, "background.mp4")
+SIDE_MENU_WIDTH = 420
 
 
 def _get_config_file() -> str:
@@ -393,16 +399,21 @@ class LauncherApp(ctk.CTk):
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
-        self.server_players_value: Optional[str] = None
-        self.mod_count_value: Optional[str] = None
+        self.video_instance = None
+        self.video_player = None
+        self.menu_open = False
+        self.menu_animating = False
+        self.side_menu_x = -SIDE_MENU_WIDTH
+        self.arma_running = False
 
         self.title("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
-        self.geometry("980x760")
+        self.state("zoomed")
         self.resizable(True, True)
         self._build_ui()
-        self._schedule_info_refresh(initial_delay_ms=250)
+        self._start_arma_state_monitor()
         self.after(800, lambda: threading.Thread(target=self._check_launcher_update, daemon=True).start())
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _set_window_icon(self) -> None:
         """Setzt das Fenster-Icon (Titelleiste/Taskbar) auf das Projektlogo."""
@@ -415,280 +426,266 @@ class LauncherApp(ctk.CTk):
     def _build_ui(self) -> None:
         self.configure(fg_color="#0b1018")
 
-        # Hero-Bereich
-        hero = ctk.CTkFrame(self, fg_color="#101a2a", corner_radius=18)
-        hero.pack(fill="x", padx=18, pady=(18, 10))
-        hero.columnconfigure(1, weight=1)
+        self.video_widget = tk.Frame(self, bg="black", highlightthickness=0)
+        self.video_widget.place(relx=0, rely=0, relwidth=1, relheight=1)
+        self.video_widget.lower()
+        self.after(150, self._init_background_video)
+
+        self.main_content = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_content.place(relx=0.5, rely=0.5, anchor="center")
 
         if os.path.isfile(LOGO_PNG_PATH):
             try:
                 logo_pil = Image.open(LOGO_PNG_PATH)
-                self.logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(84, 84))
-                ctk.CTkLabel(hero, image=self.logo_image, text="").grid(
-                    row=0, column=0, rowspan=2, padx=(18, 14), pady=14
-                )
+                self.logo_image = ctk.CTkImage(light_image=logo_pil, dark_image=logo_pil, size=(300, 300))
+                ctk.CTkLabel(self.main_content, image=self.logo_image, text="").pack(pady=(0, 10))
             except Exception:
-                pass
+                ctk.CTkLabel(
+                    self.main_content,
+                    text="Strike Platoon",
+                    font=ctk.CTkFont(size=36, weight="bold"),
+                    text_color="#f7f4e8",
+                ).pack(pady=(0, 10))
 
         ctk.CTkLabel(
-            hero,
-            text="Strike Platoon | Arma 3 Launcher",
-            font=ctk.CTkFont(size=30, weight="bold"),
+            self.main_content,
+            text="Strike Platoon",
+            font=ctk.CTkFont(size=48, weight="bold"),
             text_color="#f7f4e8",
-        ).grid(row=0, column=1, padx=(0, 16), pady=(16, 2), sticky="w")
+        ).pack(pady=(0, 14))
+
+        self.launch_btn = ctk.CTkButton(
+            self.main_content,
+            text="Jetzt Spielen",
+            width=320,
+            height=68,
+            font=ctk.CTkFont(size=24, weight="bold"),
+            fg_color="#2b8e49",
+            hover_color="#236f3a",
+            corner_radius=18,
+            command=self._start_launch,
+        )
+        self.launch_btn.pack(pady=(0, 10))
+
+        self.status_lbl = ctk.CTkLabel(
+            self.main_content,
+            text="Bereit",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color="#e6f0ff",
+        )
+        self.status_lbl.pack()
+
+        self.menu_btn = ctk.CTkButton(
+            self,
+            text="Menu",
+            width=120,
+            height=42,
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color="#141f33",
+            hover_color="#1f2e47",
+            command=self._toggle_side_menu,
+        )
+        self.menu_btn.place(x=16, y=16)
+
+        self.side_menu = ctk.CTkFrame(self, fg_color="#0f1929", corner_radius=0, width=SIDE_MENU_WIDTH)
+        self.side_menu.place(x=self.side_menu_x, y=0, relheight=1)
+        self.side_menu.lift()
 
         ctk.CTkLabel(
-            hero,
-            text="Direktstart mit Preset",
-            font=ctk.CTkFont(size=14),
-            text_color="#8cb6d6",
-        ).grid(row=1, column=1, padx=(0, 16), pady=(0, 16), sticky="w")
+            self.side_menu,
+            text="Menue",
+            font=ctk.CTkFont(size=28, weight="bold"),
+            text_color="#f7f4e8",
+        ).pack(anchor="w", padx=20, pady=(18, 8))
 
-        stats_frame = ctk.CTkFrame(self, fg_color="#101827", corner_radius=16)
-        stats_frame.pack(fill="x", padx=18, pady=(0, 10))
-        for column in range(3):
-            stats_frame.columnconfigure(column, weight=1)
+        ctk.CTkButton(
+            self.side_menu,
+            text="Discord",
+            width=140,
+            fg_color="#35518c",
+            hover_color="#4464a7",
+            command=lambda: webbrowser.open(DISCORD_URL),
+        ).pack(anchor="w", padx=20, pady=(2, 8))
 
-        self.version_value_lbl = self._create_stat_card(
-            stats_frame, 0, "Launcher-Version", LAUNCHER_VERSION, "#35518c"
+        ctk.CTkButton(
+            self.side_menu,
+            text="Arma3 Logordner",
+            width=170,
+            fg_color="#3e3d52",
+            hover_color="#4f4e66",
+            command=self._open_log_folder,
+        ).pack(anchor="w", padx=20, pady=(0, 8))
+
+        self.toggle_log_btn = ctk.CTkButton(
+            self.side_menu,
+            text="Log anzeigen",
+            width=170,
+            fg_color="#5f4a1f",
+            hover_color="#775d2a",
+            command=self._toggle_log_visibility,
         )
-        self.server_value_lbl = self._create_stat_card(
-            stats_frame, 1, "Spieler online", "Lade...", "#2b8e49"
-        )
-        self.mod_count_lbl = self._create_stat_card(
-            stats_frame, 2, "Mods in Liste", "Lade...", "#775d2a"
-        )
+        self.toggle_log_btn.pack(anchor="w", padx=20, pady=(0, 10))
 
-        # Pfad-Karte
-        path_frame = ctk.CTkFrame(self, fg_color="#121f33", corner_radius=14)
-        path_frame.pack(fill="x", padx=18, pady=(2, 10))
+        path_frame = ctk.CTkFrame(self.side_menu, fg_color="#121f33", corner_radius=12)
+        path_frame.pack(fill="x", padx=16, pady=(0, 10))
 
-        ctk.CTkLabel(path_frame, text="Arma 3 EXE", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=0, column=0, padx=(14, 8), pady=(12, 6), sticky="w"
+        ctk.CTkLabel(path_frame, text="Arma 3 EXE", anchor="w", text_color="#c9d8e8").grid(
+            row=0, column=0, padx=(10, 6), pady=(10, 6), sticky="w"
         )
         self.ent_arma = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_arma.grid(row=0, column=1, padx=6, pady=(12, 6), sticky="ew")
+        self.ent_arma.grid(row=0, column=1, padx=6, pady=(10, 6), sticky="ew")
+        ctk.CTkButton(path_frame, text="...", width=34, command=self._browse_arma).grid(
+            row=0, column=2, padx=(4, 10), pady=(10, 6)
+        )
 
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_arma,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=0, column=2, padx=(6, 8), pady=(12, 6))
-
-        ctk.CTkLabel(path_frame, text="TS3 EXE", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=1, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
+        ctk.CTkLabel(path_frame, text="TS3 EXE", anchor="w", text_color="#c9d8e8").grid(
+            row=1, column=0, padx=(10, 6), pady=(0, 6), sticky="w"
         )
         self.ent_ts = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_ts.grid(row=1, column=1, padx=6, pady=(0, 12), sticky="ew")
+        self.ent_ts.grid(row=1, column=1, padx=6, pady=(0, 6), sticky="ew")
+        ctk.CTkButton(path_frame, text="...", width=34, command=self._browse_ts).grid(
+            row=1, column=2, padx=(4, 10), pady=(0, 6)
+        )
 
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_ts,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=1, column=2, padx=(6, 8), pady=(0, 12))
-
-        ctk.CTkLabel(path_frame, text="TS3 Pluginpfad", width=120, anchor="w", text_color="#c9d8e8").grid(
-            row=2, column=0, padx=(14, 8), pady=(0, 12), sticky="w"
+        ctk.CTkLabel(path_frame, text="TS3 Pluginpfad", anchor="w", text_color="#c9d8e8").grid(
+            row=2, column=0, padx=(10, 6), pady=(0, 10), sticky="w"
         )
         self.ent_ts_plugins = ctk.CTkEntry(path_frame, fg_color="#0d1524", border_color="#27405f")
-        self.ent_ts_plugins.grid(row=2, column=1, padx=6, pady=(0, 12), sticky="ew")
-
-        ctk.CTkButton(
-            path_frame, text="...", width=36, command=self._browse_ts_plugins,
-            fg_color="#254367", hover_color="#315781"
-        ).grid(row=2, column=2, padx=(6, 8), pady=(0, 12))
-
-        ctk.CTkButton(
-            path_frame, text="Auto erkennen", width=130, command=self._auto_detect_paths,
-            fg_color="#375a2d", hover_color="#466f39"
-        ).grid(row=0, column=3, padx=(6, 14), pady=(12, 6))
-        ctk.CTkButton(
-            path_frame, text="Pfade speichern", width=130, command=self._save_paths,
-            fg_color="#375a2d", hover_color="#466f39"
-        ).grid(row=1, column=3, padx=(6, 14), pady=(0, 12))
+        self.ent_ts_plugins.grid(row=2, column=1, padx=6, pady=(0, 10), sticky="ew")
+        ctk.CTkButton(path_frame, text="...", width=34, command=self._browse_ts_plugins).grid(
+            row=2, column=2, padx=(4, 10), pady=(0, 10)
+        )
 
         path_frame.columnconfigure(1, weight=1)
 
-        # Aktionsleiste
-        action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        action_frame.pack(fill="x", padx=18, pady=(0, 8))
+        ctk.CTkButton(
+            self.side_menu,
+            text="Auto erkennen",
+            width=160,
+            fg_color="#375a2d",
+            hover_color="#466f39",
+            command=self._auto_detect_paths,
+        ).pack(anchor="w", padx=20, pady=(0, 8))
 
-        self.log_btn = ctk.CTkButton(
-            action_frame,
-            text="Arma3 Logordner",
-            width=140, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#3e3d52", hover_color="#4f4e66",
-            command=self._open_log_folder,
-        )
-        self.log_btn.pack(side="left")
+        ctk.CTkButton(
+            self.side_menu,
+            text="Pfade speichern",
+            width=160,
+            fg_color="#375a2d",
+            hover_color="#466f39",
+            command=self._save_paths,
+        ).pack(anchor="w", padx=20, pady=(0, 10))
 
-        self.toggle_log_btn = ctk.CTkButton(
-            action_frame,
-            text="Log anzeigen",
-            width=120, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#5f4a1f", hover_color="#775d2a",
-            command=self._toggle_log_visibility,
-        )
-        self.toggle_log_btn.pack(side="left", padx=(8, 0))
-
-        self.discord_btn = ctk.CTkButton(
-            action_frame,
-            text="Discord",
-            width=120, height=44,
-            font=ctk.CTkFont(size=12),
-            fg_color="#35518c", hover_color="#4464a7",
-            command=lambda: webbrowser.open(DISCORD_URL),
-        )
-        self.discord_btn.pack(side="left", padx=(8, 0))
-
-        self.launch_btn = ctk.CTkButton(
-            action_frame,
-            text="SPIEL STARTEN",
-            width=260, height=50,
-            font=ctk.CTkFont(size=16, weight="bold"),
-            fg_color="#2b8e49", hover_color="#236f3a",
-            command=self._start_launch,
-        )
-        self.launch_btn.pack(side="right")
-
-        # Status
-        self.status_lbl = ctk.CTkLabel(
-            self,
-            text="Bereit",
-            font=ctk.CTkFont(size=14, weight="bold"),
-            text_color="#95b9d8",
-        )
-        self.status_lbl.pack(anchor="w", padx=22, pady=(0, 6))
-
-        # Log (initial versteckt)
         self.log_box = ctk.CTkTextbox(
-            self,
+            self.side_menu,
             font=ctk.CTkFont(family="Consolas", size=11),
             fg_color="#0b1422",
             border_color="#223c5c",
             border_width=1,
-            height=260,
+            height=220,
         )
         self.log_box.configure(state="disabled")
 
         self._load_paths_into_ui()
 
-    def _create_stat_card(
-        self,
-        parent: ctk.CTkFrame,
-        column: int,
-        title: str,
-        value: str,
-        accent_color: str,
-    ) -> ctk.CTkLabel:
-        card = ctk.CTkFrame(parent, fg_color="#121f33", corner_radius=12)
-        card.grid(row=0, column=column, padx=8, pady=8, sticky="nsew")
+    def _init_background_video(self) -> None:
+        if not os.path.isfile(BACKGROUND_VIDEO_PATH):
+            self._log(f"[WARN] background.mp4 nicht gefunden: {BACKGROUND_VIDEO_PATH}")
+            return
 
-        ctk.CTkLabel(
-            card,
-            text=title,
-            font=ctk.CTkFont(size=12),
-            text_color="#9ab3ca",
-        ).pack(anchor="w", padx=14, pady=(12, 2))
-
-        value_label = ctk.CTkLabel(
-            card,
-            text=value,
-            font=ctk.CTkFont(size=22, weight="bold"),
-            text_color="#f7f4e8",
-        )
-        value_label.pack(anchor="w", padx=14, pady=(0, 4))
-
-        ctk.CTkLabel(
-            card,
-            text=" ",
-            fg_color=accent_color,
-            corner_radius=999,
-            width=40,
-            height=4,
-        ).pack(anchor="w", padx=14, pady=(0, 12))
-
-        return value_label
-
-    def _schedule_info_refresh(self, initial_delay_ms: int = 60000) -> None:
-        self.after(initial_delay_ms, self._refresh_info_async)
-
-    def _refresh_info_async(self) -> None:
-        threading.Thread(target=self._refresh_info_worker, daemon=True).start()
-        self._schedule_info_refresh()
-
-    def _refresh_info_worker(self) -> None:
-        players_text = "Nicht erreichbar"
-        mod_count_text = "Nicht erreichbar"
+        if vlc is None:
+            self._log("[WARN] python-vlc nicht verfuegbar. Video-Hintergrund deaktiviert.")
+            return
 
         try:
-            players_text = self._fetch_server_player_text()
+            self.video_instance = vlc.Instance("--no-video-title-show")
+            self.video_player = self.video_instance.media_player_new()
+            media = self.video_instance.media_new(BACKGROUND_VIDEO_PATH)
+            media.add_option("input-repeat=-1")
+            self.video_player.set_media(media)
+            self.video_player.set_hwnd(self.video_widget.winfo_id())
+            self.video_player.audio_set_mute(False)
+            self.video_player.audio_set_volume(70)
+            self.after(250, self._play_background_video)
         except Exception as exc:
-            self._log(f"[WARN] Serverstatus konnte nicht geladen werden: {exc}")
+            self._log(f"[WARN] Video-Hintergrund konnte nicht gestartet werden: {exc}")
 
+    def _play_background_video(self) -> None:
         try:
-            response = requests.get(PRESET_URL, timeout=15)
-            response.raise_for_status()
-            mod_count_text = str(len(parse_preset(response.text)))
+            if self.video_player is not None:
+                self.video_player.play()
         except Exception as exc:
-            self._log(f"[WARN] Modliste konnte nicht geladen werden: {exc}")
+            self._log(f"[WARN] Video-Wiedergabe fehlgeschlagen: {exc}")
 
-        def _apply() -> None:
-            self.server_value_lbl.configure(text=players_text)
-            self.mod_count_lbl.configure(text=mod_count_text)
+    def _toggle_side_menu(self) -> None:
+        if self.menu_animating:
+            return
+        self.menu_open = not self.menu_open
+        self.menu_animating = True
+        self._animate_side_menu()
 
-        self.after(0, _apply)
+    def _animate_side_menu(self) -> None:
+        target = 0 if self.menu_open else -SIDE_MENU_WIDTH
+        step = 36 if self.menu_open else -36
 
-    def _fetch_server_player_text(self) -> str:
-        for port in SERVER_QUERY_PORTS:
-            stats = self._query_a2s_info(SERVER_IP, port)
-            if stats is not None:
-                players, max_players = stats
-                return f"{players}/{max_players}"
-        return "Offline"
+        if (self.menu_open and self.side_menu_x < target) or ((not self.menu_open) and self.side_menu_x > target):
+            self.side_menu_x += step
+            if self.menu_open and self.side_menu_x > target:
+                self.side_menu_x = target
+            if (not self.menu_open) and self.side_menu_x < target:
+                self.side_menu_x = target
+            self.side_menu.place_configure(x=self.side_menu_x)
+            self.after(10, self._animate_side_menu)
+            return
 
-    def _query_a2s_info(self, host: str, port: int) -> Optional[tuple[int, int]]:
-        request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
+        self.side_menu_x = target
+        self.side_menu.place_configure(x=self.side_menu_x)
+        self.menu_animating = False
 
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(2.5)
-                sock.sendto(request, (host, port))
-                response, _ = sock.recvfrom(4096)
-        except (TimeoutError, OSError):
-            return None
+    def _start_arma_state_monitor(self) -> None:
+        self._refresh_arma_state()
 
-        if len(response) < 6 or response[:4] != b"\xFF\xFF\xFF\xFF":
-            return None
+    def _refresh_arma_state(self) -> None:
+        running = self._is_arma_running()
+        if running != self.arma_running:
+            self.arma_running = running
+            if running:
+                self.launch_btn.configure(text="Bitte ARMA 3 schliessen...", state="disabled", fg_color="#70443a")
+                self._set_status("ARMA 3 laeuft bereits", "#ffb199")
+                self.iconify()
+            else:
+                self.launch_btn.configure(text="Jetzt Spielen", state="normal", fg_color="#2b8e49")
+                self._set_status("Bereit", "#e6f0ff")
+        self.after(3000, self._refresh_arma_state)
 
-        if response[4] == 0x41:
-            challenge = response[5:9]
+    def _is_arma_running(self) -> bool:
+        for exe_name in ("arma3_x64.exe", "arma3.exe"):
             try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.settimeout(2.5)
-                    sock.sendto(request + challenge, (host, port))
-                    response, _ = sock.recvfrom(4096)
-            except (TimeoutError, OSError):
-                return None
+                output = subprocess.check_output(
+                    ["tasklist", "/FI", f"IMAGENAME eq {exe_name}", "/FO", "CSV", "/NH"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                )
+            except Exception:
+                continue
 
-        if len(response) < 6 or response[4] != 0x49:
-            return None
+            for line in output.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if "No tasks are running" in stripped or "Keine Aufgaben" in stripped:
+                    continue
+                return True
+        return False
 
-        index = 5
-        index += 1  # protocol
-        for _ in range(4):
-            end = response.find(b"\x00", index)
-            if end == -1:
-                return None
-            index = end + 1
-
-        if index + 6 > len(response):
-            return None
-
-        index += 2  # app id
-        players = response[index]
-        max_players = response[index + 1]
-        return int(players), int(max_players)
+    def _on_close(self) -> None:
+        try:
+            if self.video_player is not None:
+                self.video_player.stop()
+        except Exception:
+            pass
+        self.destroy()
 
     def _toggle_log_visibility(self) -> None:
         self.log_visible = not self.log_visible
@@ -1346,6 +1343,12 @@ class LauncherApp(ctk.CTk):
         return True
 
     def _start_launch(self) -> None:
+        if self._is_arma_running():
+            self.launch_btn.configure(text="Bitte ARMA 3 schliessen...", state="disabled", fg_color="#70443a")
+            self._set_status("ARMA 3 laeuft bereits", "#ffb199")
+            self._log("[INFO] ARMA 3 laeuft bereits. Bitte zuerst ARMA 3 schliessen.")
+            return
+
         self.selected_arma_exe = self.ent_arma.get().strip()
         self.selected_ts_exe = self.ent_ts.get().strip()
         self.selected_ts_plugins_dir = self.ent_ts_plugins.get().strip()

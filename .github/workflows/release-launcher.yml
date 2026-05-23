@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+    paths-ignore:
+      - modlist.html
+      - .github/workflows/release-launcher.yml
 
 permissions:
   contents: write

@@ -646,20 +646,26 @@ class LauncherApp(ctk.CTk):
     def _query_a2s_info(self, host: str, port: int) -> Optional[tuple[int, int]]:
         request = b"\xFF\xFF\xFF\xFFTSource Engine Query\x00"
 
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(2.5)
-            sock.sendto(request, (host, port))
-            response, _ = sock.recvfrom(4096)
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.settimeout(2.5)
+                sock.sendto(request, (host, port))
+                response, _ = sock.recvfrom(4096)
+        except (TimeoutError, OSError):
+            return None
 
         if len(response) < 6 or response[:4] != b"\xFF\xFF\xFF\xFF":
             return None
 
         if response[4] == 0x41:
             challenge = response[5:9]
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.settimeout(2.5)
-                sock.sendto(request + challenge, (host, port))
-                response, _ = sock.recvfrom(4096)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.settimeout(2.5)
+                    sock.sendto(request + challenge, (host, port))
+                    response, _ = sock.recvfrom(4096)
+            except (TimeoutError, OSError):
+                return None
 
         if len(response) < 6 or response[4] != 0x49:
             return None
@@ -1118,8 +1124,50 @@ class LauncherApp(ctk.CTk):
                 "    Start-Sleep -Seconds 8\n"
                 "    exit 1\n"
                 "}\n"
+                "Show-Step 92 'Pruefe neue Launcher-Datei...'\n"
+                "$ready = $false\n"
+                "for ($attempt = 1; $attempt -le 10; $attempt++) {\n"
+                "    try {\n"
+                "        $stream = [System.IO.File]::Open($target, 'Open', 'Read', 'ReadWrite')\n"
+                "        $stream.Close()\n"
+                "        $ready = $true\n"
+                "        break\n"
+                "    } catch {\n"
+                "        Write-Log (\"Launcher-Datei noch nicht bereit, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
+                "        Start-Sleep -Seconds 2\n"
+                "    }\n"
+                "}\n"
+                "if (-not $ready) {\n"
+                "    Show-Step 100 'Neue Launcher-Datei konnte nicht vorbereitet werden.'\n"
+                "    Write-Host ''\n"
+                "    Write-Host 'Die neue Launcher-Datei ist noch blockiert oder unvollstaendig.'\n"
+                "    Write-Host 'Details stehen in:'\n"
+                "    Write-Host $log\n"
+                "    Start-Sleep -Seconds 8\n"
+                "    exit 1\n"
+                "}\n"
                 "Show-Step 95 'Starte den aktualisierten Launcher neu...'\n"
-                "Start-Process -FilePath $target\n"
+                "$started = $false\n"
+                "for ($attempt = 1; $attempt -le 5; $attempt++) {\n"
+                "    try {\n"
+                "        Start-Process -FilePath $target -WorkingDirectory (Split-Path -Path $target -Parent)\n"
+                "        $started = $true\n"
+                "        break\n"
+                "    } catch {\n"
+                "        Write-Host ('      Start fehlgeschlagen: {0}' -f $_.Exception.Message)\n"
+                "        Write-Log (\"Launcher-Start fehlgeschlagen, Versuch {0}: {1}\" -f $attempt, $_.Exception.Message)\n"
+                "        Start-Sleep -Seconds 2\n"
+                "    }\n"
+                "}\n"
+                "if (-not $started) {\n"
+                "    Show-Step 100 'Launcher konnte nicht neu gestartet werden.'\n"
+                "    Write-Host ''\n"
+                "    Write-Host 'Der Launcher wurde ersetzt, konnte aber nicht automatisch neu starten.'\n"
+                "    Write-Host 'Bitte starte ihn manuell. Details stehen in:'\n"
+                "    Write-Host $log\n"
+                "    Start-Sleep -Seconds 10\n"
+                "    exit 1\n"
+                "}\n"
                 "Show-Step 100 'Fertig. Der Launcher wird jetzt neu gestartet.'\n"
                 "Write-Host ''\n"
                 "Write-Host 'Update abgeschlossen.'\n"

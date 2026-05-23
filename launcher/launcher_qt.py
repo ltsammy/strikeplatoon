@@ -53,11 +53,13 @@ class LauncherWindow(QMainWindow):
         self.cfg = backend.load_config()
         self.ts_proc: Optional[subprocess.Popen] = None
         self.ts_url_pid: Optional[int] = None
+        self.started_ts_pids: set[int] = set()
         self.selected_arma_exe = ""
         self.selected_ts_exe = ""
         self.selected_ts_plugins_dir = ""
         self._aspect_w = 1000
         self._aspect_h = 1337
+        self._muted_ts_pids: set[int] = set()
 
         self.setWindowTitle("Strike Platoon | Arma 3 Launcher")
         self._set_window_icon()
@@ -823,12 +825,40 @@ class LauncherWindow(QMainWindow):
 
         return pids
 
+    def _close_running_teamspeak_instances(self) -> bool:
+        existing_pids = sorted(self._list_teamspeak_pids())
+        if not existing_pids:
+            return True
+
+        self._log(f"[INFO] TeamSpeak laeuft bereits. Beende {len(existing_pids)} Instanz(en) fuer sauberen Neustart...")
+        failed: list[int] = []
+        for pid in existing_pids:
+            if self._kill_pid_tree(pid):
+                self._log(f"[OK] TeamSpeak-Instanz beendet (PID {pid}).")
+            else:
+                failed.append(pid)
+                self._log(f"[WARN] TeamSpeak-Instanz konnte nicht beendet werden (PID {pid}).")
+
+        time.sleep(1.0)
+        remaining = sorted(self._list_teamspeak_pids())
+        if remaining:
+            self._log(
+                "[FEHLER] TeamSpeak konnte nicht vollstaendig beendet werden. "
+                f"Restliche PID(s): {', '.join(str(pid) for pid in remaining)}"
+            )
+            return False
+
+        if failed:
+            return False
+
+        self.ts_proc = None
+        self.ts_url_pid = None
+        self.started_ts_pids.clear()
+        self._muted_ts_pids.clear()
+        return True
+
     def _start_teamspeak_managed(self) -> bool:
         ts_url = f"ts3server://{backend.TS3_IP}?port={backend.TS3_PORT}"
-
-        if self.ts_proc and self.ts_proc.poll() is None:
-            self._log("[INFO] TeamSpeak wurde bereits vom Launcher gestartet.")
-            return True
 
         manual_ts_path = self._normalize_path(self.selected_ts_exe or self.ent_ts.text())
         ts_exe = manual_ts_path if os.path.isfile(manual_ts_path) else None
@@ -851,6 +881,11 @@ class LauncherWindow(QMainWindow):
         self.ent_ts.setText(ts_exe)
         self.selected_ts_exe = ts_exe
 
+        if not self._close_running_teamspeak_instances():
+            self._log("[FEHLER] TeamSpeak-Neustart nicht moeglich. Bitte TeamSpeak manuell schliessen und erneut versuchen.")
+            self.ts_proc = None
+            return False
+
         if not self._is_tfar_plugin_installed():
             install_plugin = self._ask_yes_no_threadsafe(
                 "TFAR Plugin fehlt",
@@ -862,8 +897,11 @@ class LauncherWindow(QMainWindow):
                 self._log("[INFO] TFAR-Installation uebersprungen.")
 
         self.ts_url_pid = None
-        args_no_sound = [ts_exe, "-nosingleinstance", "-nosound", ts_url]
-        args_fallback = [ts_exe, "-nosingleinstance", ts_url]
+        self.started_ts_pids.clear()
+        self._muted_ts_pids.clear()
+        before_pids = self._list_teamspeak_pids()
+        args_no_sound = [ts_exe, "-nosingleinstance", "-nosound"]
+        args_fallback = [ts_exe, "-nosingleinstance"]
 
         try:
             self._log("[INFO] Starte TeamSpeak mit deaktivierten Sounds...")
@@ -872,13 +910,17 @@ class LauncherWindow(QMainWindow):
             if self.ts_proc.poll() is not None:
                 self._log("[WARN] TeamSpeak hat '-nosound' nicht akzeptiert. Starte ohne Sound-Flag neu.")
                 self.ts_proc = subprocess.Popen(args_fallback, cwd=os.path.dirname(ts_exe))
+
+            connected = webbrowser.open(ts_url)
+            if not connected:
+                self._log("[WARN] TeamSpeak-Verbindung per ts3server:// konnte nicht geoeffnet werden.")
         except OSError as exc:
             if getattr(exc, "winerror", None) == 740:
                 self._log("[WARN] TeamSpeak verlangt erhoehte Rechte (WinError 740).")
                 self._log("[HINWEIS] Starte TeamSpeak jetzt explizit erhoeht (runas).")
 
-                params_no_sound = f'-nosingleinstance -nosound "{ts_url}"'
-                params_fallback = f'-nosingleinstance "{ts_url}"'
+                params_no_sound = "-nosingleinstance -nosound"
+                params_fallback = "-nosingleinstance"
 
                 before = self._list_teamspeak_pids()
                 rc = ctypes.windll.shell32.ShellExecuteW(
@@ -903,14 +945,19 @@ class LauncherWindow(QMainWindow):
 
                 if rc > 32:
                     self._log("[OK] TeamSpeak erhoeht gestartet.")
+                    connected = webbrowser.open(ts_url)
+                    if not connected:
+                        self._log("[WARN] TeamSpeak-Verbindung per ts3server:// konnte nicht geoeffnet werden.")
                     time.sleep(1.5)
                     after = self._list_teamspeak_pids()
                     new_pids = sorted(after - before)
                     if new_pids:
                         self.ts_url_pid = new_pids[-1]
+                        self.started_ts_pids.update(new_pids)
                         self._log(f"[INFO] TeamSpeak PID fuer Auto-Beenden gemerkt: {self.ts_url_pid}")
                     else:
                         self._log("[WARN] Keine neue TeamSpeak-PID erkannt. Laufende TS-Instanz wird nicht automatisch beendet.")
+                    self._mute_teamspeak_audio_sessions(self.started_ts_pids)
                     self.ts_proc = None
                     return True
 
@@ -923,9 +970,11 @@ class LauncherWindow(QMainWindow):
                     new_pids = sorted(after - before)
                     if new_pids:
                         self.ts_url_pid = new_pids[-1]
+                        self.started_ts_pids.update(new_pids)
                         self._log(f"[INFO] TeamSpeak PID fuer Auto-Beenden gemerkt: {self.ts_url_pid}")
                     else:
                         self._log("[WARN] Keine neue TeamSpeak-PID erkannt. Laufende TS-Instanz wird nicht automatisch beendet.")
+                    self._mute_teamspeak_audio_sessions(self.started_ts_pids)
                     self.ts_proc = None
                     return True
                 self._log("[FEHLER] TeamSpeak konnte auch per Protokoll-URL nicht gestartet werden.")
@@ -935,7 +984,94 @@ class LauncherWindow(QMainWindow):
             return False
 
         self._log(f"[OK] TeamSpeak gestartet (PID: {self.ts_proc.pid})")
+        try:
+            after_pids = self._list_teamspeak_pids()
+            self.started_ts_pids = set(after_pids - before_pids)
+            if self.started_ts_pids:
+                self._log(f"[INFO] TeamSpeak-PIDs fuer Auto-Beenden: {', '.join(str(pid) for pid in sorted(self.started_ts_pids))}")
+        except Exception:
+            self.started_ts_pids = set()
+
+        self._mute_teamspeak_audio_sessions(self.started_ts_pids)
         return True
+
+    def _mute_teamspeak_audio_sessions(self, ts_pids: set[int]) -> None:
+        if not ts_pids:
+            return
+
+        try:
+            from pycaw.pycaw import AudioUtilities  # type: ignore[import-not-found]
+        except Exception:
+            self._log("[INFO] pycaw nicht verfuegbar: TeamSpeak-Sessions konnten nicht automatisch stummgeschaltet werden.")
+            return
+
+        muted_any = False
+        try:
+            sessions = AudioUtilities.GetAllSessions()
+            for session in sessions:
+                process = getattr(session, "Process", None)
+                if process is None:
+                    continue
+                if int(process.pid) not in ts_pids:
+                    continue
+
+                volume = getattr(session, "SimpleAudioVolume", None)
+                if volume is None:
+                    continue
+
+                volume.SetMute(1, None)
+                self._muted_ts_pids.add(int(process.pid))
+                muted_any = True
+
+            if muted_any:
+                self._log("[OK] TeamSpeak-Audio (Event-Sounds) wurde fuer gestartete Instanz stummgeschaltet.")
+            else:
+                self._log("[WARN] TeamSpeak-Audio-Session zum Stummschalten nicht gefunden.")
+        except Exception as exc:
+            self._log(f"[WARN] TeamSpeak-Audio konnte nicht stummgeschaltet werden: {exc}")
+
+    def _kill_pid_tree(self, pid: int) -> bool:
+        try:
+            result = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T"],
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0:
+                return True
+
+            result_force = subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                text=True,
+            )
+            if result_force.returncode == 0:
+                return True
+
+            # If TS was started elevated (runas), non-elevated taskkill may fail.
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                "cmd.exe",
+                f'/c taskkill /PID {pid} /T /F',
+                None,
+                0,
+            )
+            if rc <= 32:
+                return False
+
+            time.sleep(1.2)
+            check = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            output = (check.stdout or "").strip().lower()
+            return ("no tasks are running" in output) or ("keine aufgaben" in output) or not output
+        except Exception:
+            return False
 
     def _parse_version_parts(self, version_text: str) -> tuple[int, ...]:
         parts = re.findall(r"\d+", version_text)
@@ -1345,6 +1481,17 @@ class LauncherWindow(QMainWindow):
         exit_code = proc.wait()
         self._log(f"\n[INFO] Arma 3 beendet. Exit-Code: {exit_code}")
 
+        # Prefer explicit PID cleanup first, because ts3 can spawn a child and let launcher-tracked proc exit.
+        if self.started_ts_pids:
+            self._log("[INFO] Beende gestartete TeamSpeak-Prozesse...")
+            for pid in sorted(self.started_ts_pids):
+                closed = self._kill_pid_tree(pid)
+                if closed:
+                    self._log(f"[OK] TeamSpeak 3 Prozess beendet (PID {pid}).")
+                else:
+                    self._log(f"[WARN] TeamSpeak 3 Prozess konnte nicht beendet werden (PID {pid}).")
+            self.started_ts_pids.clear()
+
         if self.ts_proc and self.ts_proc.poll() is None:
             self._log("[INFO] Beende TeamSpeak 3...")
             try:
@@ -1361,28 +1508,19 @@ class LauncherWindow(QMainWindow):
                 self.ts_proc = None
         elif self.ts_url_pid:
             self._log(f"[INFO] Beende TeamSpeak 3 (PID {self.ts_url_pid})...")
-            try:
-                result = subprocess.run(
-                    ["taskkill", "/PID", str(self.ts_url_pid), "/T"],
-                    capture_output=True,
-                    text=True,
-                )
-                if result.returncode == 0:
-                    self._log("[OK] TeamSpeak 3 beendet.")
-                else:
-                    result_force = subprocess.run(
-                        ["taskkill", "/PID", str(self.ts_url_pid), "/T", "/F"],
-                        capture_output=True,
-                        text=True,
-                    )
-                    if result_force.returncode == 0:
-                        self._log("[WARN] TeamSpeak 3 musste hart beendet werden.")
-                    else:
-                        self._log("[WARN] TeamSpeak 3 konnte nicht automatisch beendet werden.")
-            except Exception as exc:
-                self._log(f"[WARN] TeamSpeak 3 konnte nicht beendet werden: {exc}")
-            finally:
-                self.ts_url_pid = None
+            closed = self._kill_pid_tree(self.ts_url_pid)
+            if closed:
+                self._log("[OK] TeamSpeak 3 beendet.")
+            else:
+                self._log("[WARN] TeamSpeak 3 konnte nicht automatisch beendet werden (ggf. UAC abgelehnt).")
+            self.ts_url_pid = None
+
+        # Final safety net for leftover TS processes not captured by pid tracking.
+        try:
+            for pid in sorted(self._list_teamspeak_pids()):
+                self._kill_pid_tree(pid)
+        except Exception:
+            pass
 
         if exit_code != 0:
             self._set_status(f"Arma 3 Crash (Code {exit_code})", "#f44336")

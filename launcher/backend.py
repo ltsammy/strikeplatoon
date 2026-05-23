@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import ctypes
 import webbrowser
 import winreg
 from tkinter import messagebox
@@ -100,7 +101,84 @@ def save_config(cfg: dict) -> None:
 
 
 def ensure_admin_rights() -> bool:
-    return True
+    if os.name != "nt":
+        return True
+
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        is_admin = False
+
+    if is_admin:
+        return True
+
+    elevate_now = messagebox.askyesno(
+        "Administratorrechte erforderlich",
+        "Der Launcher benoetigt Administratorrechte. Jetzt mit Administratorrechten neu starten?",
+    )
+    if not elevate_now:
+        return False
+
+    try:
+        launched = False
+
+        def _runas_shell_execute(executable: str, params: str, working_dir: str) -> bool:
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                executable,
+                params,
+                working_dir,
+                1,
+            )
+            return rc > 32
+
+        def _runas_via_cmd(executable: str, args: list[str], working_dir: str) -> bool:
+            # cmd/start fallback is robust for debug runs where direct argument passing can fail.
+            full_cmd = subprocess.list2cmdline([executable, *args])
+            cmd_params = f'/c start "" {full_cmd}'
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None,
+                "runas",
+                "cmd.exe",
+                cmd_params,
+                working_dir,
+                0,
+            )
+            return rc > 32
+
+        if getattr(sys, "frozen", False):
+            executable = os.path.abspath(sys.executable)
+            params = subprocess.list2cmdline(sys.argv[1:])
+            working_dir = os.path.dirname(executable)
+            launched = _runas_shell_execute(executable, params, working_dir)
+            if not launched:
+                launched = _runas_via_cmd(executable, sys.argv[1:], working_dir)
+        else:
+            python_exe = os.path.abspath(sys.executable)
+            script_path = os.path.abspath(sys.argv[0])
+            args = [script_path, *sys.argv[1:]]
+            params = subprocess.list2cmdline(args)
+            working_dir = os.path.dirname(script_path)
+            launched = _runas_shell_execute(python_exe, params, working_dir)
+            if not launched:
+                launched = _runas_via_cmd(python_exe, args, working_dir)
+
+        if not launched:
+            messagebox.showerror(
+                "Administratorrechte",
+                "Der Launcher konnte nicht mit Administratorrechten gestartet werden.",
+            )
+            return False
+
+        # Neue erhoehte Instanz laeuft bereits; aktuelle Instanz beenden.
+        return False
+    except Exception as exc:
+        messagebox.showerror(
+            "Administratorrechte",
+            f"Der Launcher konnte nicht mit Administratorrechten gestartet werden:\n{exc}",
+        )
+        return False
 
 
 def _current_executable_path() -> str:

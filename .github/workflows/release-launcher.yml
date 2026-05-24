@@ -72,9 +72,21 @@ jobs:
         run: |
           python -c "from pathlib import Path; import os; version = os.environ['RELEASE_TAG']; Path('launcher/version.py').write_text(f'LAUNCHER_VERSION = {version!r}\n', encoding='utf-8')"
 
+      - name: Write EXE version resource
+        env:
+          RELEASE_TAG: ${{ steps.next_version.outputs.tag }}
+        run: |
+          python -c "from pathlib import Path; import os; import re; tag = os.environ['RELEASE_TAG']; nums = [int(x) for x in re.findall(r'\d+', tag)][:4]; nums += [0] * (4 - len(nums)); fv = '.'.join(str(n) for n in nums); text = f'''# UTF-8\nVSVersionInfo(\n  ffi=FixedFileInfo(\n    filevers=({nums[0]}, {nums[1]}, {nums[2]}, {nums[3]}),\n    prodvers=({nums[0]}, {nums[1]}, {nums[2]}, {nums[3]}),\n    mask=0x3f,\n    flags=0x0,\n    OS=0x4,\n    fileType=0x1,\n    subtype=0x0,\n    date=(0, 0)\n  ),\n  kids=[\n    StringFileInfo(\n      [\n        StringTable(\n          '040904B0',\n          [\n            StringStruct('CompanyName', 'Strike Platoon'),\n            StringStruct('FileDescription', '104 Launcher for Arma 3'),\n            StringStruct('FileVersion', '{fv}'),\n            StringStruct('InternalName', 'launcher'),\n            StringStruct('LegalCopyright', 'Strike Platoon'),\n            StringStruct('OriginalFilename', 'launcher.exe'),\n            StringStruct('ProductName', '104 Launcher'),\n            StringStruct('ProductVersion', '{fv}')\n          ]\n        )\n      ]\n    ),\n    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n  ]\n)\n'''; Path('launcher/version_info.txt').write_text(text, encoding='utf-8')"
+
       - name: Build launcher EXE
         run: |
-          python -m PyInstaller --noconfirm --clean --onefile --windowed --uac-admin --name launcher --distpath dist --workpath build/pyinstaller --specpath . --add-data "launcher/logo.png;." --add-data "launcher/logo.ico;." --add-data "launcher/background.jpg;." --icon launcher/logo.ico launcher/launcher_qt.py
+          python -m PyInstaller --noconfirm --clean --distpath dist --workpath build/pyinstaller launcher.spec
+
+      - name: Write SHA256 checksum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash -Algorithm SHA256 dist/launcher.exe).Hash.ToLower()
+          Set-Content -Path dist/launcher.exe.sha256 -Value "$hash  launcher.exe" -Encoding Ascii
 
       - name: Create GitHub release and upload binaries
         uses: softprops/action-gh-release@v2
@@ -84,4 +96,5 @@ jobs:
           generate_release_notes: true
           files: |
             dist/launcher.exe
+            dist/launcher.exe.sha256
           overwrite_files: true

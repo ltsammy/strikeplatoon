@@ -14,7 +14,7 @@ python -m PyInstaller ^
   --clean ^
   --onefile ^
   --windowed ^
-  --uac-admin ^
+  --noupx ^
   --name "launcher" ^
   --distpath "dist" ^
   --workpath "build\pyinstaller" ^

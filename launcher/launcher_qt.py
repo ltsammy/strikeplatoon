@@ -750,6 +750,9 @@ class LauncherWindow(QMainWindow):
         if steam:
             arma_path, _ = backend.find_arma3(steam)
             arma_path = self._normalize_path(arma_path or "")
+        if not arma_path:
+            detected_exe, _ = backend._find_arma3_on_drives()
+            arma_path = self._normalize_path(detected_exe or "")
 
         ts_path = self._normalize_path(backend.find_teamspeak_exe() or "")
         plugins_path = self._detect_ts_plugins_dir(ts_path)
@@ -1481,14 +1484,17 @@ class LauncherWindow(QMainWindow):
                 self._log("[OK] Arma 3 aus manuellem Pfad.")
             else:
                 steam = backend.find_steam_path()
-                if not steam:
-                    self._log("[FEHLER] Steam nicht gefunden und kein gueltiger Arma-Pfad gesetzt!")
-                    self._set_status("Fehler", "#f44336")
-                    return
+                if steam:
+                    arma3_exe, workshop_path = backend.find_arma3(steam)
+                else:
+                    arma3_exe, workshop_path = None, None
 
-                arma3_exe, workshop_path = backend.find_arma3(steam)
                 if not arma3_exe:
-                    self._log("[FEHLER] Arma 3 nicht gefunden!")
+                    self._log("[INFO] Steam-Registry nicht gefunden, suche Arma 3 auf allen Laufwerken...")
+                    arma3_exe, workshop_path = backend._find_arma3_on_drives()
+
+                if not arma3_exe:
+                    self._log("[FEHLER] Arma 3 konnte auf keinem Laufwerk gefunden werden!")
                     self._set_status("Fehler", "#f44336")
                     return
                 self.ent_arma.setText(arma3_exe)
@@ -1564,7 +1570,7 @@ class LauncherWindow(QMainWindow):
             args = [arma3_exe, f"-mod={';'.join(mod_paths)}"]
             selected_profile = str(self.cfg.get("arma_profile", "") or "").strip()
             if selected_profile:
-                args.append(f"-name={selected_profile}")
+                args.extend(["-name", selected_profile])
                 self._log(f"[INFO] Verwende Arma-Profil: {selected_profile}")
             if join_server:
                 args.extend(

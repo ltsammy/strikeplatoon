@@ -312,6 +312,23 @@ def _install_launcher_if_needed() -> bool:
         return True
 
 
+def _get_all_drives() -> list[str]:
+    """Return a list of existing Windows drive root paths (e.g. ['C:\\', 'D:\\', 'E:\\'])."""
+    drives: list[str] = []
+    try:
+        import string
+        bitmask = ctypes.windll.kernel32.GetLogicalDrives()
+        for letter in string.ascii_uppercase:
+            if bitmask & 1:
+                root = f"{letter}:\\"
+                if os.path.isdir(root):
+                    drives.append(root)
+            bitmask >>= 1
+    except Exception:
+        drives = [os.environ.get("SystemDrive", "C") + "\\"]
+    return drives
+
+
 def find_steam_path() -> Optional[str]:
     entries = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Valve\Steam", "InstallPath"),
@@ -326,6 +343,21 @@ def find_steam_path() -> Optional[str]:
                     return str(value)
         except OSError:
             continue
+    return None
+
+
+def _find_steam_path_on_drives() -> Optional[str]:
+    """Scan all drives for a Steam installation when the registry lookup fails."""
+    common_subdirs = [
+        os.path.join("Program Files (x86)", "Steam"),
+        os.path.join("Program Files", "Steam"),
+        "Steam",
+    ]
+    for drive in _get_all_drives():
+        for sub in common_subdirs:
+            candidate = os.path.join(drive, sub)
+            if os.path.isdir(candidate) and os.path.isfile(os.path.join(candidate, "steam.exe")):
+                return candidate
     return None
 
 
@@ -359,6 +391,29 @@ def find_arma3(steam_path: str) -> tuple[Optional[str], Optional[str]]:
     return None, None
 
 
+def _find_arma3_on_drives() -> tuple[Optional[str], Optional[str]]:
+    """Scan all drives for Arma 3 outside of Steam library detection."""
+    common_subdirs = [
+        os.path.join("Program Files (x86)", "Steam", "steamapps"),
+        os.path.join("Program Files", "Steam", "steamapps"),
+        os.path.join("Steam", "steamapps"),
+        os.path.join("SteamLibrary", "steamapps"),
+        os.path.join("Games", "steamapps"),
+        "steamapps",
+    ]
+    for drive in _get_all_drives():
+        for sub in common_subdirs:
+            steamapps = os.path.join(drive, sub)
+            if not os.path.isdir(steamapps):
+                continue
+            for exe_name in ("arma3_x64.exe", "arma3.exe"):
+                exe = os.path.join(steamapps, "common", "Arma 3", exe_name)
+                if os.path.isfile(exe):
+                    workshop = os.path.join(steamapps, "workshop", "content", ARMA3_APP_ID)
+                    return exe, workshop
+    return None, None
+
+
 def find_teamspeak_exe() -> Optional[str]:
     registry_entries = [
         (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\TeamSpeak 3 Client", ["InstallDir", "InstallLocation"]),
@@ -386,6 +441,16 @@ def find_teamspeak_exe() -> Optional[str]:
         os.path.join(os.environ.get("ProgramFiles", ""), "TeamSpeak 3 Client"),
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "TeamSpeak 3 Client"),
     ]
+    for drive in _get_all_drives():
+        for sub in (
+            os.path.join("Program Files", "TeamSpeak 3 Client"),
+            os.path.join("Program Files (x86)", "TeamSpeak 3 Client"),
+            os.path.join("TeamSpeak 3 Client"),
+            os.path.join("Tools", "TeamSpeak 3 Client"),
+        ):
+            candidate_dir = os.path.join(drive, sub)
+            if candidate_dir not in fallback_dirs and os.path.isdir(candidate_dir):
+                fallback_dirs.append(candidate_dir)
     for directory in fallback_dirs:
         for exe_name in exe_names:
             candidate = os.path.join(directory, exe_name)

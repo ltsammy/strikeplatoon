@@ -22,8 +22,8 @@ from bs4 import BeautifulSoup
 from version import LAUNCHER_VERSION
 
 PRESET_URL = "https://raw.githubusercontent.com/ltsammy/strikeplatoon/refs/heads/main/modlist.html"
-SERVER_IP = "94.199.215.95"
-SERVER_PORT = "2302"
+SERVER_IP = "fresh.streampanel.net"
+SERVER_PORT = "11920"
 SERVER_PW = "jimmy"
 TS3_IP = "94.199.215.95"
 TS3_PORT = "9987"
